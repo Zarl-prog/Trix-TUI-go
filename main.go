@@ -103,7 +103,7 @@ type model struct {
 	flatTree      []FlatNode
 	textarea      textarea.Model
 	terminalLog   viewport.Model
-	terminalBuf   strings.Builder
+	terminalBuf   *strings.Builder
 	terminalInput string
 	currentPath   string
 	hasChanges    bool
@@ -280,6 +280,7 @@ func initialModel() model {
 		active:   "terminal",
 		textarea: ta,
 		terminalLog: vp,
+		terminalBuf: &strings.Builder{},
 		expanded: make(map[string]bool),
 		themes:   []Theme{AyuDark, AyuLight, AyuMirage},
 		themeIdx: 0,
