@@ -674,9 +674,13 @@ func (m model) View() string {
 		gitInfo = fmt.Sprintf("  %s%s", m.gitBranch, dirtyIcon)
 	}
 
+	line, col := m.textarea.CursorLine(), m.textarea.CursorColumn()
+	cursorPos := fmt.Sprintf(" Ln %d, Col %d ", line+1, col+1)
+
 	leftStatus := lipgloss.JoinHorizontal(lipgloss.Left,
 		lipgloss.NewStyle().Background(theme.Active).Foreground(theme.Background).Bold(true).Render(" TRIX "),
 		lipgloss.NewStyle().Foreground(theme.Active).Render(" "+filename+" "),
+		lipgloss.NewStyle().Foreground(theme.Inactive).Render(cursorPos),
 		lipgloss.NewStyle().Foreground(theme.Inactive).Render(gitInfo),
 	)
 
