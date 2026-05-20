@@ -674,7 +674,7 @@ func (m model) View() string {
 		gitInfo = fmt.Sprintf("  %s%s", m.gitBranch, dirtyIcon)
 	}
 
-	line, col := m.textarea.CursorLine(), m.textarea.CursorColumn()
+	line, col := m.textarea.Line(), m.textarea.LineInfo().ColumnOffset
 	cursorPos := fmt.Sprintf(" Ln %d, Col %d ", line+1, col+1)
 
 	leftStatus := lipgloss.JoinHorizontal(lipgloss.Left,
