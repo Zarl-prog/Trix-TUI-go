@@ -1,0 +1,257 @@
+import sys
+import json
+import subprocess
+import os
+import threading
+from pathlib import Path
+from datetime import datetime, timezone
+import winpty
+
+# ==============================================================================
+# Git Logic
+# ==============================================================================
+
+def get_git_branch(repo_path):
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_path, capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            return {"status": "ok", "branch": result.stdout.strip()}
+        return {"status": "error", "message": "not a git repo"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+def get_git_status(repo_path):
+    try:
+        result = subprocess.run(
+            ["git", "status", "--short"],
+            cwd=repo_path, capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            lines = result.stdout.strip().split("\n")
+            count = len([l for l in lines if l.strip()])
+            return {"status": "ok", "dirty": count > 0, "count": count}
+        return {"status": "error", "message": "not a git repo"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+def get_git_history(repo_path, count=50):
+    try:
+        result = subprocess.run(
+            ["git", "log", "--format=%H|%h|%s|%an|%ae|%ai", "-n", str(count)],
+            cwd=repo_path, capture_output=True, text=True, timeout=5
+        )
+        commits = []
+        for line in result.stdout.strip().split("\n"):
+            if not line.strip(): continue
+            parts = line.split("|")
+            if len(parts) >= 6:
+                full_hash, hash7, message, author, email, date = parts[:6]
+                commits.append({
+                    "full_hash": full_hash,
+                    "hash7": hash7,
+                    "message": message,
+                    "author": author,
+                    "email": email,
+                    "date": date
+                })
+        return {"status": "ok", "commits": commits}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+def get_git_show(repo_path, commit_hash):
+    try:
+        result = subprocess.run(
+            ["git", "show", "--numstat", "--format=", commit_hash],
+            cwd=repo_path, capture_output=True, text=True, timeout=5
+        )
+        files = []
+        for line in result.stdout.strip().split("\n"):
+            parts = line.split("\t")
+            if len(parts) == 3:
+                try:
+                    adds = int(parts[0]) if parts[0] != "-" else 0
+                    dels = int(parts[1]) if parts[1] != "-" else 0
+                except ValueError:
+                    adds, dels = 0, 0
+                files.append({"name": parts[2].strip(), "adds": adds, "dels": dels})
+        return {"status": "ok", "files": files}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# ==============================================================================
+# File System Logic
+# ==============================================================================
+
+def get_file_tree(root_path):
+    try:
+        root = Path(root_path)
+        def build_tree(path):
+            name = path.name if path.name else str(path)
+            node = {"name": name, "path": str(path), "is_dir": path.is_dir()}
+            if path.is_dir():
+                try:
+                    node["children"] = [build_tree(p) for p in path.iterdir() if not p.name.startswith(".")]
+                except PermissionError:
+                    node["children"] = []
+            return node
+        return {"status": "ok", "tree": build_tree(root)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+def read_file(path):
+    try:
+        content = Path(path).read_text(encoding="utf-8")
+        return {"status": "ok", "content": content}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+def save_file(path, content):
+    try:
+        Path(path).write_text(content, encoding="utf-8")
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+def create_file(path):
+    try:
+        Path(path).touch()
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+def delete_file(path):
+    try:
+        p = Path(path)
+        if p.is_dir():
+            p.rmdir()
+        else:
+            p.unlink()
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+def rename_file(old, new):
+    try:
+        Path(old).rename(new)
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+def search_files(root_path, query):
+    try:
+        results = []
+        root = Path(root_path)
+        for p in root.rglob("*"):
+            if ".git" in p.parts: continue
+            if not p.is_file(): continue
+            try:
+                # Basic binary check
+                with open(p, "rb") as f:
+                    if b"\x00" in f.read(1024): continue
+                
+                content = p.read_text(encoding="utf-8", errors="ignore")
+                for i, line in enumerate(content.splitlines()):
+                    if query.lower() in line.lower():
+                        results.append({"file": str(p), "line": i + 1, "text": line.strip()})
+            except Exception:
+                continue
+        return {"status": "ok", "results": results}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# ==============================================================================
+# Terminal / PTY Logic
+# ==============================================================================
+
+_pty = None
+
+def terminal_spawn(rows=24, cols=80):
+    global _pty
+    try:
+        if _pty: _pty.terminate()
+        _pty = winpty.PtyProcess.spawn("powershell.exe", dimensions=(rows, cols))
+        
+        # Start a background thread to read from PTY and push to stdout
+        def read_loop():
+            while _pty and _pty.isalive():
+                try:
+                    data = _pty.read(4096)
+                    if data:
+                        send_event("terminal_data", {"data": data})
+                except Exception:
+                    break
+        
+        threading.Thread(target=read_loop, daemon=True).start()
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+def terminal_write(data):
+    global _pty
+    if _pty and _pty.isalive():
+        try:
+            _pty.write(data)
+            return {"status": "ok"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    return {"status": "error", "message": "PTY not running"}
+
+# ==============================================================================
+# Bridge Infrastructure
+# ==============================================================================
+
+def send_response(id, result):
+    print(json.dumps({"id": id, "result": result}), flush=True)
+
+def send_event(event, data):
+    print(json.dumps({"event": event, "data": data}), flush=True)
+
+def main():
+    for line in sys.stdin:
+        try:
+            req = json.loads(line)
+            method = req.get("method")
+            params = req.get("params", {})
+            req_id = req.get("id")
+
+            if method == "get_git_history":
+                res = get_git_history(params.get("path", "."), params.get("count", 50))
+            elif method == "get_git_show":
+                res = get_git_show(params.get("path", "."), params.get("hash"))
+            elif method == "get_git_branch":
+                res = get_git_branch(params.get("path", "."))
+            elif method == "get_git_status":
+                res = get_git_status(params.get("path", "."))
+            elif method == "get_file_tree":
+                res = get_file_tree(params.get("path", "."))
+            elif method == "read_file":
+                res = read_file(params.get("path"))
+            elif method == "save_file":
+                res = save_file(params.get("path"), params.get("content"))
+            elif method == "create_file":
+                res = create_file(params.get("path"))
+            elif method == "delete_file":
+                res = delete_file(params.get("path"))
+            elif method == "rename_file":
+                res = rename_file(params.get("old"), params.get("new"))
+            elif method == "search_files":
+                res = search_files(params.get("root", "."), params.get("query"))
+            elif method == "terminal_spawn":
+                res = terminal_spawn(params.get("rows", 24), params.get("cols", 80))
+            elif method == "terminal_write":
+                res = terminal_write(params.get("data"))
+            elif method == "quit":
+                break
+            else:
+                res = {"status": "error", "message": f"Unknown method: {method}"}
+            
+            if req_id is not None:
+                send_response(req_id, res)
+        except Exception as e:
+            print(json.dumps({"error": str(e)}), flush=True)
+
+if __name__ == "__main__":
+    main()
