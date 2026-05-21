@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -26,11 +27,16 @@ const (
 var (
 	headerStyle = lipgloss.NewStyle().
 			Foreground(activeCol).
-			Bold(true).
-			Padding(0, 1)
+			Bold(true)
+
+	folderStyle = lipgloss.NewStyle().
+			Foreground(mutedCol)
+
+	versionStyle = lipgloss.NewStyle().
+			Foreground(versionCol)
 
 	footerStyle = lipgloss.NewStyle().
-			Background(bgCol).
+			Background(headerBgCol).
 			Height(1)
 
 	footerLeftStyle = lipgloss.NewStyle().
@@ -51,14 +57,18 @@ var (
 // = :============================================================================
 
 type model struct {
-	width  int
-	height int
-	active string // "files", "editor", "terminal"
+	width         int
+	height        int
+	active        string // "files", "editor", "terminal"
+	currentFolder string
 }
 
 func initialModel() model {
+	cwd, _ := os.Getwd()
+	folder := filepath.Base(cwd)
 	return model{
-		active: "editor",
+		active:        "editor",
+		currentFolder: folder,
 	}
 }
 
