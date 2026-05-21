@@ -109,16 +109,16 @@ func renderPanel(title, icon string, width, height int, active bool) string {
 	
 	// Create the main panel style
 	style := basePanelStyle.Copy().
-		Width(width).
-		Height(height).
-		Border(lipgloss.RoundedBorder()).
+		Width(width - 2). // Border takes 2 cells
+		Height(height - 2).
+		Border(lipgloss.RoundedBorder(), true).
 		BorderForeground(borderColor)
 
 	if active {
 		style = style.Bold(true)
 	}
 
-	// Render empty panel content
+	// Render the panel content (empty for now)
 	content := style.Render("")
 	lines := strings.Split(content, "\n")
 	
@@ -130,13 +130,15 @@ func renderPanel(title, icon string, width, height int, active bool) string {
 		}
 		styledTitle := titleStyle.Render(titleStr)
 
-		// Top line components
+		// Border components
 		borderStyle := lipgloss.NewStyle().Foreground(borderColor)
 		leftCorner := borderStyle.Render("╭─")
 		rightCorner := borderStyle.Render("╮")
 		
-		// Fill dashes
-		dashCount := width - lipgloss.Width(styledTitle) - 2 - 1
+		// Fill dashes to match exact width
+		// width - leftCorner(2) - styledTitle - rightCorner(1)
+		visibleTitleLen := lipgloss.Width(styledTitle)
+		dashCount := width - 2 - visibleTitleLen - 1
 		if dashCount < 0 { dashCount = 0 }
 		dashes := borderStyle.Render(strings.Repeat("─", dashCount))
 
@@ -162,10 +164,14 @@ func (m model) View() string {
 	editorW := (m.width * 45) / 100
 	terminalW := m.width - filesW - editorW - (gap * 2)
 
-	// 1. Header Implementation
+	// --- 1. HEADER ---
 	brand := headerStyle.PaddingLeft(1).Render("T  R  I  X")
-	folder := folderStyle.Width(m.width - lipgloss.Width(brand) - 10).Align(lipgloss.Center).Render(m.currentFolder)
 	version := versionStyle.PaddingRight(1).Render("v0.1.0")
+	
+	// Middle folder name
+	remainingHeaderW := m.width - lipgloss.Width(brand) - lipgloss.Width(version)
+	if remainingHeaderW < 0 { remainingHeaderW = 0 }
+	folder := folderStyle.Width(remainingHeaderW).Align(lipgloss.Center).Render(m.currentFolder)
 	
 	header := lipgloss.NewStyle().
 		Width(m.width).
@@ -173,26 +179,22 @@ func (m model) View() string {
 		Background(headerBgCol).
 		Render(lipgloss.JoinHorizontal(lipgloss.Left, brand, folder, version))
 
-	// 2. Main Area Implementation
+	// --- 2. MAIN AREA ---
 	filesPanel := renderPanel("Files", "📁", filesW, mainH, m.active == "files")
 	editorPanel := renderPanel("Editor", "📝", editorW, mainH, m.active == "editor")
 	terminalPanel := renderPanel("Terminal", "💻", terminalW, mainH, m.active == "terminal")
 
-	// Spacer between panels
 	spacer := lipgloss.NewStyle().Width(gap).Background(bgCol).Render("")
 
-	mainArea := lipgloss.NewStyle().
-		Background(bgCol).
-		Height(mainH).
-		Render(lipgloss.JoinHorizontal(lipgloss.Top,
-			filesPanel,
-			spacer,
-			editorPanel,
-			spacer,
-			terminalPanel,
-		))
+	mainArea := lipgloss.JoinHorizontal(lipgloss.Top,
+		filesPanel,
+		spacer,
+		editorPanel,
+		spacer,
+		terminalPanel,
+	)
 
-	// 3. Status Bar Implementation
+	// --- 3. STATUS BAR ---
 	statusBrand := lipgloss.NewStyle().Foreground(activeCol).PaddingLeft(1).Render("TRIX")
 	statusActive := lipgloss.NewStyle().Foreground(titleCol).PaddingLeft(2).Render(strings.ToUpper(m.active))
 	
@@ -202,7 +204,9 @@ func (m model) View() string {
 	pq := pillStyle.Render("[q Quit]")
 	pills := lipgloss.JoinHorizontal(lipgloss.Left, p1, p2, p3, pq)
 
-	statusSpacer := lipgloss.NewStyle().Width(m.width - lipgloss.Width(statusBrand) - lipgloss.Width(statusActive) - lipgloss.Width(pills) - 1).Render("")
+	remainingStatusW := m.width - lipgloss.Width(statusBrand) - lipgloss.Width(statusActive) - lipgloss.Width(pills)
+	if remainingStatusW < 0 { remainingStatusW = 0 }
+	statusSpacer := lipgloss.NewStyle().Width(remainingStatusW).Render("")
 	
 	footer := lipgloss.NewStyle().
 		Width(m.width).
@@ -210,8 +214,15 @@ func (m model) View() string {
 		Background(headerBgCol).
 		Render(lipgloss.JoinHorizontal(lipgloss.Left, statusBrand, statusActive, statusSpacer, pills))
 
-	// Screen assembly
-	return lipgloss.JoinVertical(lipgloss.Left, header, mainArea, footer)
+	// --- FINAL ASSEMBLY ---
+	finalView := lipgloss.JoinVertical(lipgloss.Left, header, mainArea, footer)
+	
+	// Force background and full size
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height).
+		Background(bgCol).
+		Render(finalView)
 }
 
 func main() {
