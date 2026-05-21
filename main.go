@@ -387,6 +387,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		
+		filesW := m.width / 5
+		divW := 1
+		remaining := m.width - filesW - (divW * 2)
+		editorW := remaining / 2
+		termW := remaining - editorW
+		
+		m.textarea.SetWidth(editorW)
+		m.textarea.SetHeight(m.height - 3)
+		m.terminalLog.Width = termW
+		m.terminalLog.Height = m.height - 3
 	case tea.MouseMsg:
 		filesWidth := m.filesWidth
 		if filesWidth == 0 { filesWidth = m.width / 5 }
@@ -430,7 +441,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.dragDivider == 1 {
 					m.filesWidth = msg.X
 				} else {
-					// This logic is simplified, needs careful calculation for editorWidth
 					m.editorWidth = msg.X - editorStart
 				}
 			} else if msg.Action == tea.MouseActionRelease {
@@ -710,6 +720,10 @@ func (m model) View() string {
 	if editorW == 0 { editorW = remaining / 2 }
 	termW := remaining - editorW
 
+	// Styles for panels to ensure they take full space and have background
+	panelStyle := lipgloss.NewStyle().Height(mainH).Background(theme.Background)
+	dividerStyle := lipgloss.NewStyle().Width(divW).Height(mainH).Foreground(theme.Border).Background(theme.Background)
+
 	// Header
 	brand := lipgloss.NewStyle().Foreground(theme.Active).Bold(true).Render(" TRIX")
 	folder := lipgloss.NewStyle().Foreground(theme.Inactive).Width(m.width - 25).Align(lipgloss.Center).Render(".")
@@ -720,12 +734,13 @@ func (m model) View() string {
 	// Panels
 	var panels []string
 	if m.fileTreeVisible {
-		panels = append(panels, lipgloss.NewStyle().Width(filesW).Height(mainH).Background(theme.Background).
-			Render(lipgloss.JoinVertical(lipgloss.Left, renderPanelHeader(m, "Files", filesW, m.active == "files"), renderFileTree(m, filesW, mainH-1))))
-		panels = append(panels, lipgloss.NewStyle().Width(divW).Height(mainH).Foreground(theme.Border).Render("│"))
+		filesHeader := renderPanelHeader(m, "Files", filesW, m.active == "files")
+		filesContent := renderFileTree(m, filesW, mainH-1)
+		panels = append(panels, panelStyle.Width(filesW).Render(lipgloss.JoinVertical(lipgloss.Left, filesHeader, filesContent)))
+		panels = append(panels, dividerStyle.Render("│"))
 	}
 	
-	// Editor with Search
+	// Editor
 	m.textarea.SetWidth(editorW)
 	m.textarea.SetHeight(mainH - 1)
 	editorContent := m.textarea.View()
@@ -740,18 +755,18 @@ func (m model) View() string {
 		)
 		editorContent = lipgloss.JoinVertical(lipgloss.Left, searchBar, m.textarea.View())
 	}
-	panels = append(panels, lipgloss.NewStyle().Width(editorW).Height(mainH).Background(theme.Background).
-		Render(lipgloss.JoinVertical(lipgloss.Left, renderPanelHeader(m, "Editor", editorW, m.active == "editor"), editorContent)))
+	editorHeader := renderPanelHeader(m, "Editor", editorW, m.active == "editor")
+	panels = append(panels, panelStyle.Width(editorW).Render(lipgloss.JoinVertical(lipgloss.Left, editorHeader, editorContent)))
 	
-	panels = append(panels, lipgloss.NewStyle().Width(divW).Height(mainH).Foreground(theme.Border).Render("│"))
+	panels = append(panels, dividerStyle.Render("│"))
 	
 	// Terminal
 	m.terminalLog.Width, m.terminalLog.Height = termW, mainH - 2
 	termCursor := ""
 	if m.cursorBlink && m.active == "terminal" { termCursor = "█" }
 	termInput := lipgloss.NewStyle().Foreground(theme.Active).Render("> ") + m.terminalInput + termCursor
-	panels = append(panels, lipgloss.NewStyle().Width(termW).Height(mainH).Background(theme.Background).
-		Render(lipgloss.JoinVertical(lipgloss.Left, renderPanelHeader(m, "Terminal", termW, m.active == "terminal"), m.terminalLog.View(), termInput)))
+	terminalHeader := renderPanelHeader(m, "Terminal", termW, m.active == "terminal")
+	panels = append(panels, panelStyle.Width(termW).Render(lipgloss.JoinVertical(lipgloss.Left, terminalHeader, m.terminalLog.View(), termInput)))
 
 	mainArea := lipgloss.JoinHorizontal(lipgloss.Top, panels...)
 
@@ -761,12 +776,7 @@ func (m model) View() string {
 	unsaved := ""
 	if m.hasChanges { unsaved = lipgloss.NewStyle().Foreground(theme.Unsaved).Render(" *") }
 	
-	val := m.textarea.Value()
-	cursor := m.textarea.Cursor()
-	sub := val[:cursor]
-	line := strings.Count(sub, "\n")
-	col := len(sub) - strings.LastIndex(sub, "\n") - 1
-	if strings.LastIndex(sub, "\n") == -1 { col = len(sub) }
+	line, col := m.textarea.Line(), m.textarea.LineInfo().ColumnOffset
 	cursorPos := fmt.Sprintf(" Ln %d, Col %d ", line+1, col+1)
 	
 	gitInfo := ""
@@ -784,8 +794,10 @@ func (m model) View() string {
 		lipgloss.NewStyle().Foreground(theme.Inactive).Render(" "+m.currentLang+" "),
 	)
 	keyHints := lipgloss.NewStyle().Foreground(theme.Inactive).Render(" ^S Save  ^R Reload  ^] Cycle  ^C Quit ")
-	spacer := lipgloss.NewStyle().Width(m.width - lipgloss.Width(leftStatus) - lipgloss.Width(keyHints)).Render("")
-	footer := lipgloss.NewStyle().Background(theme.BottomBar).Render(lipgloss.JoinHorizontal(lipgloss.Left, leftStatus, spacer, keyHints))
+	spacerWidth := m.width - lipgloss.Width(leftStatus) - lipgloss.Width(keyHints)
+	if spacerWidth < 0 { spacerWidth = 0 }
+	spacer := lipgloss.NewStyle().Width(spacerWidth).Render("")
+	footer := lipgloss.NewStyle().Background(theme.BottomBar).Width(m.width).Render(lipgloss.JoinHorizontal(lipgloss.Left, leftStatus, spacer, keyHints))
 
 	view := lipgloss.JoinVertical(lipgloss.Left, header, mainArea, footer)
 
