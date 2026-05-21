@@ -14,11 +14,13 @@ import (
 // ==============================================================================
 
 const (
-	bgCol      = lipgloss.Color("#0d1016")
-	activeCol  = lipgloss.Color("#5ac1fe")
-	titleCol   = lipgloss.Color("#4b4c4e")
-	dashCol    = lipgloss.Color("#3f4043")
-	sideBgCol  = lipgloss.Color("#131721") // Slight contrast for side panels
+	bgCol        = lipgloss.Color("#0a0b0f")
+	headerBgCol  = lipgloss.Color("#0d0e14")
+	activeCol    = lipgloss.Color("#5ac1fe")
+	inactiveCol  = lipgloss.Color("#1e2130")
+	titleCol     = lipgloss.Color("#bfbdb6")
+	mutedCol     = lipgloss.Color("#4b4c4e")
+	versionCol   = lipgloss.Color("#3f4043")
 )
 
 var (
