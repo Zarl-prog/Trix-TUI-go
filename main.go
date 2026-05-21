@@ -15,13 +15,13 @@ import (
 // ==============================================================================
 
 const (
-	bgCol        = lipgloss.Color("#0a0b0f")
-	headerBgCol  = lipgloss.Color("#0d0e14")
-	activeCol    = lipgloss.Color("#5ac1fe")
-	inactiveCol  = lipgloss.Color("#1e2130")
-	titleCol     = lipgloss.Color("#bfbdb6")
-	mutedCol     = lipgloss.Color("#4b4c4e")
-	versionCol   = lipgloss.Color("#3f4043")
+	bgCol       = lipgloss.Color("#0a0b0f")
+	headerBgCol = lipgloss.Color("#0d0e14")
+	activeCol   = lipgloss.Color("#5ac1fe")
+	inactiveCol = lipgloss.Color("#1e2130")
+	titleCol    = lipgloss.Color("#bfbdb6")
+	mutedCol    = lipgloss.Color("#4b4c4e")
+	versionCol  = lipgloss.Color("#3f4043")
 )
 
 var (
@@ -35,26 +35,20 @@ var (
 	versionStyle = lipgloss.NewStyle().
 			Foreground(versionCol)
 
-	footerStyle = lipgloss.NewStyle().
-			Background(headerBgCol).
-			Height(1)
-
-	footerLeftStyle = lipgloss.NewStyle().
+	pillStyle = lipgloss.NewStyle().
+			Background(inactiveCol).
 			Foreground(activeCol).
-			Padding(0, 1)
+			Padding(0, 1).
+			MarginLeft(1)
 
-	footerRightStyle = lipgloss.NewStyle().
-				Foreground(titleCol).
-				Padding(0, 1)
-
-	// Base panel style
-	panelStyle = lipgloss.NewStyle().
-			Background(bgCol)
+	basePanelStyle = lipgloss.NewStyle().
+			Padding(0, 1).
+			Border(lipgloss.RoundedBorder())
 )
 
 // ==============================================================================
 // Model
-// = :============================================================================
+// ==============================================================================
 
 type model struct {
 	width         int
@@ -65,10 +59,9 @@ type model struct {
 
 func initialModel() model {
 	cwd, _ := os.Getwd()
-	folder := filepath.Base(cwd)
 	return model{
 		active:        "editor",
-		currentFolder: folder,
+		currentFolder: filepath.Base(cwd),
 	}
 }
 
@@ -101,28 +94,68 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // View Helpers
 // ==============================================================================
 
-func renderHeader(m model, title string, width int, isActive bool) string {
-	var color lipgloss.Color
-	if isActive {
-		color = activeCol
-	} else {
-		color = titleCol
+func renderPanel(m model, title, icon string, width, height int, active bool) string {
+	borderColor := inactiveCol
+	titleColor := mutedCol
+	if active {
+		borderColor = activeCol
+		titleColor = activeCol
 	}
 
-	label := fmt.Sprintf(" %s ", strings.ToUpper(title))
-	leftDashes := "──"
+	// Create the title string: " 📁 Files "
+	titleStr := fmt.Sprintf(" %s %s ", icon, title)
 	
-	// Calculate remaining space for right dashes
-	// width - 2 (left dashes) - length of label
-	rightDashCount := width - 2 - len(label)
-	if rightDashCount < 0 {
-		rightDashCount = 0
-	}
-	rightDashes := strings.Repeat("─", rightDashCount)
+	// Create the style for the panel
+	style := basePanelStyle.Copy().
+		Width(width).
+		Height(height).
+		BorderForeground(borderColor)
 
-	return lipgloss.NewStyle().Foreground(dashCol).Render(leftDashes) +
-		lipgloss.NewStyle().Foreground(color).Render(label) +
-		lipgloss.NewStyle().Foreground(dashCol).Render(rightDashes)
+	if active {
+		style = style.Bold(true)
+	}
+
+	// Lip Gloss doesn't natively support "title in border" easily with just Border()
+	// So we render the panel and then overlay/preprocess the top border.
+	// However, we can use the BorderTop(true) and custom rendering.
+	// For simplicity and "stunning" look, we'll manually construct the top line.
+	
+	content := style.Render("")
+	lines := strings.Split(content, "\n")
+	
+	if len(lines) > 0 {
+		// Replace the first line (top border) with our custom titled border
+		// ╭─ 📁 Files ──────────╮
+		topBorderRunes := []rune(lines[0])
+		titleRunes := []rune(titleStr)
+		
+		// Style the title part
+		styledTitle := lipgloss.NewStyle().Foreground(titleColor).Render(string(titleRunes))
+		if active {
+			styledTitle = lipgloss.NewStyle().Foreground(activeCol).Bold(true).Render(string(titleRunes))
+		}
+
+		// Reconstruct the top line
+		// ╭─
+		left := string(topBorderRunes[:2])
+		// ╮
+		right := string(topBorderRunes[len(topBorderRunes)-1:])
+		
+		// Fill remaining space with ─
+		// Length of middle = total width - len(left) - len(right)
+		// But we need to account for the styled title length.
+		middleWidth := width - 2 - 1 // approximate
+		
+		// Construct the top line manually to be safe
+		topLine := lipgloss.NewStyle().Foreground(borderColor).Render("╭─") +
+			styledTitle +
+			lipgloss.NewStyle().Foreground(borderColor).Render(strings.Repeat("─", width-lipgloss.Width(styledTitle)-3)) +
+			lipgloss.NewStyle().Foreground(borderColor).Render("╮")
+			
+		lines[0] = topLine
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 func (m model) View() string {
@@ -134,10 +167,12 @@ func (m model) View() string {
 	headerH := 1
 	footerH := 1
 	mainH := m.height - headerH - footerH
+	gap := 1
 
-	filesW := m.width / 5
-	editorW := (m.width * 2) / 5 // 40%
-	terminalW := m.width - filesW - editorW // Remaining 40%
+	// Widths: 20%, 45%, 35%
+	filesW := (m.width * 20) / 100
+	editorW := (m.width * 45) / 100
+	terminalW := m.width - filesW - editorW - (gap * 2)
 
 	// 1. Header
 	brand := headerStyle.PaddingLeft(1).Render("T  R  I  X")
@@ -150,37 +185,38 @@ func (m model) View() string {
 		Background(headerBgCol).
 		Render(lipgloss.JoinHorizontal(lipgloss.Left, brand, folder, version))
 
-	// 2. Main Panels
-	filesHeader := renderHeader(m, "Files", filesW, m.active == "files")
-	filesPanel := lipgloss.NewStyle().
-		Width(filesW).
-		Height(mainH).
-		Background(sideBgCol).
-		Render(filesHeader)
+	// 2. Main Area
+	filesPanel := renderPanel(m, "Files", "📁", filesW, mainH, m.active == "files")
+	editorPanel := renderPanel(m, "Editor", "📝", editorW, mainH, m.active == "editor")
+	terminalPanel := renderPanel(m, "Terminal", "💻", terminalW, mainH, m.active == "terminal")
 
-	editorHeader := renderHeader(m, "Editor", editorW, m.active == "editor")
-	editorPanel := lipgloss.NewStyle().
-		Width(editorW).
-		Height(mainH).
-		Background(bgCol).
-		Render(editorHeader)
+	mainArea := lipgloss.JoinHorizontal(lipgloss.Top,
+		filesPanel,
+		lipgloss.NewStyle().Width(gap).Render(""),
+		editorPanel,
+		lipgloss.NewStyle().Width(gap).Render(""),
+		terminalPanel,
+	)
 
-	terminalHeader := renderHeader(m, "Terminal", terminalW, m.active == "terminal")
-	terminalPanel := lipgloss.NewStyle().
-		Width(terminalW).
-		Height(mainH).
-		Background(sideBgCol).
-		Render(terminalHeader)
+	// 3. Status Bar
+	statusBrand := lipgloss.NewStyle().Foreground(activeCol).PaddingLeft(1).Render("TRIX")
+	statusActive := lipgloss.NewStyle().Foreground(titleCol).PaddingLeft(2).Render(strings.ToUpper(m.active))
+	
+	p1 := pillStyle.Render("[^1 Files]")
+	p2 := pillStyle.Render("[^2 Editor]")
+	p3 := pillStyle.Render("[^3 Terminal]")
+	pq := pillStyle.Render("[q Quit]")
+	pills := lipgloss.JoinHorizontal(lipgloss.Left, p1, p2, p3, pq)
 
-	mainArea := lipgloss.JoinHorizontal(lipgloss.Top, filesPanel, editorPanel, terminalPanel)
+	statusSpacer := lipgloss.NewStyle().Width(m.width - lipgloss.Width(statusBrand) - lipgloss.Width(statusActive) - lipgloss.Width(pills) - 1).Render("")
+	
+	footer := lipgloss.NewStyle().
+		Width(m.width).
+		Height(footerH).
+		Background(headerBgCol).
+		Render(lipgloss.JoinHorizontal(lipgloss.Left, statusBrand, statusActive, statusSpacer, pills))
 
-	// 3. Footer
-	fLeft := footerLeftStyle.Render("TRIX")
-	fRight := footerRightStyle.Render("F1 Help")
-	spacer := lipgloss.NewStyle().Width(m.width - lipgloss.Width(fLeft) - lipgloss.Width(fRight)).Render("")
-	footer := footerStyle.Width(m.width).Render(lipgloss.JoinHorizontal(lipgloss.Left, fLeft, spacer, fRight))
-
-	return lipgloss.JoinVertical(lipgloss.Left, header, mainArea, footer)
+	return lipgloss.NewStyle().Background(bgCol).Render(lipgloss.JoinVertical(lipgloss.Left, header, mainArea, footer))
 }
 
 func main() {
