@@ -27,13 +27,16 @@ const (
 var (
 	headerStyle = lipgloss.NewStyle().
 			Foreground(activeCol).
-			Bold(true)
+			Bold(true).
+			Background(headerBgCol)
 
 	folderStyle = lipgloss.NewStyle().
-			Foreground(mutedCol)
+			Foreground(mutedCol).
+			Background(headerBgCol)
 
 	versionStyle = lipgloss.NewStyle().
-			Foreground(versionCol)
+			Foreground(versionCol).
+			Background(headerBgCol)
 
 	pillStyle = lipgloss.NewStyle().
 			Background(inactiveCol).
@@ -43,7 +46,7 @@ var (
 
 	basePanelStyle = lipgloss.NewStyle().
 			Padding(0, 1).
-			Border(lipgloss.RoundedBorder())
+			Background(bgCol)
 )
 
 // ==============================================================================
@@ -94,52 +97,50 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // View Helpers
 // ==============================================================================
 
-func renderPanel(m model, title, icon string, width, height int, active bool) string {
+func renderPanel(title, icon string, width, height int, active bool) string {
 	borderColor := inactiveCol
-	titleColor := mutedCol
+	titleColor := titleCol
 	if active {
 		borderColor = activeCol
 		titleColor = activeCol
 	}
 
-	// Create the title string: " 📁 Files "
 	titleStr := fmt.Sprintf(" %s %s ", icon, title)
 	
-	// Create the style for the panel
+	// Create the main panel style
 	style := basePanelStyle.Copy().
 		Width(width).
 		Height(height).
+		Border(lipgloss.RoundedBorder()).
 		BorderForeground(borderColor)
 
 	if active {
 		style = style.Bold(true)
 	}
 
-	// Lip Gloss doesn't natively support "title in border" easily with just Border()
-	// So we render the panel and then overlay/preprocess the top border.
-	// However, we can use the BorderTop(true) and custom rendering.
-	// For simplicity and "stunning" look, we'll manually construct the top line.
-	
+	// Render empty panel content
 	content := style.Render("")
 	lines := strings.Split(content, "\n")
 	
 	if len(lines) > 0 {
-		// Replace the first line (top border) with our custom titled border
-		// ╭─ 📁 Files ──────────╮
-		
-		// Style the title part
-		styledTitle := lipgloss.NewStyle().Foreground(titleColor).Render(titleStr)
+		// Style the title
+		titleStyle := lipgloss.NewStyle().Foreground(titleColor)
 		if active {
-			styledTitle = lipgloss.NewStyle().Foreground(activeCol).Bold(true).Render(titleStr)
+			titleStyle = titleStyle.Bold(true)
 		}
+		styledTitle := titleStyle.Render(titleStr)
 
-		// Construct the top line manually to be safe
-		topLine := lipgloss.NewStyle().Foreground(borderColor).Render("╭─") +
-			styledTitle +
-			lipgloss.NewStyle().Foreground(borderColor).Render(strings.Repeat("─", width-lipgloss.Width(styledTitle)-3)) +
-			lipgloss.NewStyle().Foreground(borderColor).Render("╮")
-			
-		lines[0] = topLine
+		// Top line components
+		borderStyle := lipgloss.NewStyle().Foreground(borderColor)
+		leftCorner := borderStyle.Render("╭─")
+		rightCorner := borderStyle.Render("╮")
+		
+		// Fill dashes
+		dashCount := width - lipgloss.Width(styledTitle) - 2 - 1
+		if dashCount < 0 { dashCount = 0 }
+		dashes := borderStyle.Render(strings.Repeat("─", dashCount))
+
+		lines[0] = leftCorner + styledTitle + dashes + rightCorner
 	}
 
 	return strings.Join(lines, "\n")
@@ -161,9 +162,9 @@ func (m model) View() string {
 	editorW := (m.width * 45) / 100
 	terminalW := m.width - filesW - editorW - (gap * 2)
 
-	// 1. Header
+	// 1. Header Implementation
 	brand := headerStyle.PaddingLeft(1).Render("T  R  I  X")
-	folder := folderStyle.Width(m.width - lipgloss.Width(brand) - 15).Align(lipgloss.Center).Render(m.currentFolder)
+	folder := folderStyle.Width(m.width - lipgloss.Width(brand) - 10).Align(lipgloss.Center).Render(m.currentFolder)
 	version := versionStyle.PaddingRight(1).Render("v0.1.0")
 	
 	header := lipgloss.NewStyle().
@@ -172,20 +173,26 @@ func (m model) View() string {
 		Background(headerBgCol).
 		Render(lipgloss.JoinHorizontal(lipgloss.Left, brand, folder, version))
 
-	// 2. Main Area
-	filesPanel := renderPanel(m, "Files", "📁", filesW, mainH, m.active == "files")
-	editorPanel := renderPanel(m, "Editor", "📝", editorW, mainH, m.active == "editor")
-	terminalPanel := renderPanel(m, "Terminal", "💻", terminalW, mainH, m.active == "terminal")
+	// 2. Main Area Implementation
+	filesPanel := renderPanel("Files", "📁", filesW, mainH, m.active == "files")
+	editorPanel := renderPanel("Editor", "📝", editorW, mainH, m.active == "editor")
+	terminalPanel := renderPanel("Terminal", "💻", terminalW, mainH, m.active == "terminal")
 
-	mainArea := lipgloss.JoinHorizontal(lipgloss.Top,
-		filesPanel,
-		lipgloss.NewStyle().Width(gap).Render(""),
-		editorPanel,
-		lipgloss.NewStyle().Width(gap).Render(""),
-		terminalPanel,
-	)
+	// Spacer between panels
+	spacer := lipgloss.NewStyle().Width(gap).Background(bgCol).Render("")
 
-	// 3. Status Bar
+	mainArea := lipgloss.NewStyle().
+		Background(bgCol).
+		Height(mainH).
+		Render(lipgloss.JoinHorizontal(lipgloss.Top,
+			filesPanel,
+			spacer,
+			editorPanel,
+			spacer,
+			terminalPanel,
+		))
+
+	// 3. Status Bar Implementation
 	statusBrand := lipgloss.NewStyle().Foreground(activeCol).PaddingLeft(1).Render("TRIX")
 	statusActive := lipgloss.NewStyle().Foreground(titleCol).PaddingLeft(2).Render(strings.ToUpper(m.active))
 	
@@ -203,7 +210,8 @@ func (m model) View() string {
 		Background(headerBgCol).
 		Render(lipgloss.JoinHorizontal(lipgloss.Left, statusBrand, statusActive, statusSpacer, pills))
 
-	return lipgloss.NewStyle().Background(bgCol).Render(lipgloss.JoinVertical(lipgloss.Left, header, mainArea, footer))
+	// Screen assembly
+	return lipgloss.JoinVertical(lipgloss.Left, header, mainArea, footer)
 }
 
 func main() {
