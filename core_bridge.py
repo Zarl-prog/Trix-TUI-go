@@ -11,29 +11,19 @@ import winpty
 # Git Logic
 # ==============================================================================
 
-def get_git_branch(repo_path):
+def get_git_branch(path):
     try:
-        result = subprocess.run(
+        r = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=repo_path, capture_output=True, text=True, timeout=5
+            cwd=path, capture_output=True, text=True, timeout=2
         )
-        if result.returncode == 0:
-            return {"status": "ok", "branch": result.stdout.strip()}
-        return {"status": "error", "message": "not a git repo"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-def get_git_status(repo_path):
-    try:
-        result = subprocess.run(
+        branch = r.stdout.strip()
+        dirty_r = subprocess.run(
             ["git", "status", "--short"],
-            cwd=repo_path, capture_output=True, text=True, timeout=5
+            cwd=path, capture_output=True, text=True, timeout=2
         )
-        if result.returncode == 0:
-            lines = result.stdout.strip().split("\n")
-            count = len([l for l in lines if l.strip()])
-            return {"status": "ok", "dirty": count > 0, "count": count}
-        return {"status": "error", "message": "not a git repo"}
+        dirty = bool(dirty_r.stdout.strip())
+        return {"status": "ok", "branch": branch, "dirty": dirty}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -145,8 +135,9 @@ def search_files(root_path, query):
         results = []
         root = Path(root_path)
         for p in root.rglob("*"):
-            if ".git" in p.parts: continue
             if not p.is_file(): continue
+            if any(junk in str(p) for junk in [".git", "__pycache__", "node_modules", ".venv", "venv"]):
+                continue
             try:
                 # Basic binary check
                 with open(p, "rb") as f:
@@ -155,7 +146,13 @@ def search_files(root_path, query):
                 content = p.read_text(encoding="utf-8", errors="ignore")
                 for i, line in enumerate(content.splitlines()):
                     if query.lower() in line.lower():
-                        results.append({"file": str(p), "line": i + 1, "text": line.strip()})
+                        results.append({
+                            "file": str(p),
+                            "line": i + 1,
+                            "text": line.strip()[:120]
+                        })
+                        if len(results) >= 200:
+                            return {"status": "ok", "results": results}
             except Exception:
                 continue
         return {"status": "ok", "results": results}
@@ -236,7 +233,7 @@ def main():
             elif method == "delete_file":
                 res = delete_file(params.get("path"))
             elif method == "rename_file":
-                res = rename_file(params.get("old"), params.get("new"))
+                res = rename_file(params.get("old_path"), params.get("new_path"))
             elif method == "search_files":
                 res = search_files(params.get("root", "."), params.get("query"))
             elif method == "terminal_spawn":

@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -12,26 +14,150 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// ==============================================================================
+// Types & Constants
+// ==============================================================================
+
 var (
-	backgroundColor   = lipgloss.Color("#0d1016")
-	borderColor       = lipgloss.Color("#3f4043")
-	activeColor        = lipgloss.Color("#5ac1fe")
-	inactiveColor      = lipgloss.Color("#bfbdb6")
-	headerFolderColor = lipgloss.Color("#4b4c4e")
-	bottomBarBg       = lipgloss.Color("#131721")
-	dividerBg          = lipgloss.Color("#1a1d23")
-	fileColor         = lipgloss.Color("#8a8986")
-	folderColor       = lipgloss.Color("#bfbdb6")
-	unsavedColor      = lipgloss.Color("#feb454")
-	terminalOutputCol = lipgloss.Color("#8a8986")
+	langMap = map[string]string{
+		".py": "Python", ".go": "Go", ".js": "JavaScript", ".ts": "TypeScript",
+		".jsx": "JavaScript", ".tsx": "TypeScript", ".rs": "Rust", ".c": "C",
+		".cpp": "C++", ".h": "C", ".hpp": "C++", ".java": "Java",
+		".rb": "Ruby", ".php": "PHP", ".sh": "Bash", ".bash": "Bash",
+		".json": "JSON", ".yaml": "YAML", ".yml": "YAML", ".toml": "TOML",
+		".md": "Markdown", ".html": "HTML", ".htm": "HTML", ".css": "CSS",
+		".sql": "SQL", ".xml": "XML", ".svg": "XML",
+	}
 )
+
+type Theme struct {
+	Name       string
+	Background lipgloss.Color
+	Border     lipgloss.Color
+	Active     lipgloss.Color
+	Inactive   lipgloss.Color
+	Muted      lipgloss.Color
+	File       lipgloss.Color
+	Folder     lipgloss.Color
+	Surface    lipgloss.Color
+	Unsaved    lipgloss.Color
+	BottomBar  lipgloss.Color
+	DividerBg  lipgloss.Color
+}
+
+var Themes = []Theme{
+	{
+		Name: "Ayu Dark",
+		Background: "#0d1016", Border: "#3f4043", Active: "#5ac1fe",
+		Inactive: "#bfbdb6", Muted: "#8a8986", File: "#8a8986",
+		Folder: "#bfbdb6", Surface: "#1f2127", Unsaved: "#feb454",
+		BottomBar: "#131721", DividerBg: "#1a1d23",
+	},
+	{
+		Name: "Ayu Light",
+		Background: "#fafafa", Border: "#d9d8d7", Active: "#55b4d4",
+		Inactive: "#5c6166", Muted: "#8a9199", File: "#8a9199",
+		Folder: "#5c6166", Surface: "#f3f4f5", Unsaved: "#fa8d3e",
+		BottomBar: "#e7e8e9", DividerBg: "#d9d8d7",
+	},
+	{
+		Name: "Ayu Mirage",
+		Background: "#1f2430", Border: "#3f4043", Active: "#5ccfe6",
+		Inactive: "#cccac2", Muted: "#8a9199", File: "#8a9199",
+		Folder: "#cccac2", Surface: "#2a2f3a", Unsaved: "#ffa759",
+		BottomBar: "#171b24", DividerBg: "#242936",
+	},
+}
 
 type FileNode struct {
 	Name     string     `json:"name"`
 	Path     string     `json:"path"`
 	IsDir    bool       `json:"is_dir"`
+	Depth    int        `json:"depth"`
 	Children []FileNode `json:"children,omitempty"`
 }
+
+type SearchMatch struct {
+	Line     int
+	ColStart int
+	ColEnd   int
+}
+
+type GlobalResult struct {
+	File string `json:"file"`
+	Line int    `json:"line"`
+	Text string `json:"text"`
+}
+
+type model struct {
+	bridge        *Bridge
+	err           error
+	width         int
+	height        int
+	active        string // "files", "editor", "terminal"
+	rootNode      FileNode
+	cursor        int
+	flatTree      []FileNode
+	textarea      textarea.Model
+	terminalLog   viewport.Model
+	terminalBuf   *strings.Builder
+	terminalInput string
+	terminalHistory []string
+	terminalHistIdx int
+	currentPath   string
+	currentLang   string
+	hasChanges    bool
+	expanded      map[string]bool
+	gitBranch     string
+	gitDirty      bool
+	
+	// Layout
+	dragging      bool
+	dragDivider   int // 1 = files|editor, 2 = editor|terminal
+	dragStartX    int
+	filesWidth    int
+	editorWidth   int
+	zenMode       bool
+	fileTreeVisible bool
+
+	// Overlays
+	overlayMode   string // "", "new_file", "rename", "delete_confirm", "open_folder", "quit_confirm"
+	overlayInput  string
+	overlayTitle  string
+	helpOpen      bool
+
+	// Search
+	searchOpen    bool
+	searchQuery   string
+	searchMatches []SearchMatch
+	searchIdx     int
+	globalSearchOpen    bool
+	globalSearchQuery   string
+	globalSearchResults []GlobalResult
+	globalSearchIdx     int
+
+	themeIdx      int
+	cursorBlink   bool
+}
+
+func (m model) currentTheme() Theme {
+	return Themes[m.themeIdx]
+}
+
+func flattenVisible(node FileNode, expanded map[string]bool, depth int) []FileNode {
+	node.Depth = depth
+	res := []FileNode{node}
+	if node.IsDir && expanded[node.Path] {
+		for _, child := range node.Children {
+			res = append(res, flattenVisible(child, expanded, depth+1)...)
+		}
+	}
+	return res
+}
+
+// ==============================================================================
+// Bridge Commands
+// ==============================================================================
 
 type FileContent struct {
 	Path    string
@@ -42,126 +168,25 @@ type TerminalData struct {
 	Data string `json:"data"`
 }
 
-type SearchResult struct {
-	File string `json:"file"`
-	Line int    `json:"line"`
-	Text string `json:"text"`
-}
-
-type Theme struct {
-	Name        string
-	Background  lipgloss.Color
-	Border      lipgloss.Color
-	Active      lipgloss.Color
-	Inactive    lipgloss.Color
-	File        lipgloss.Color
-	Folder      lipgloss.Color
-	BottomBar   lipgloss.Color
-}
-
-var (
-	AyuDark = Theme{
-		Name:       "Ayu Dark",
-		Background: lipgloss.Color("#0d1016"),
-		Border:     lipgloss.Color("#3f4043"),
-		Active:     lipgloss.Color("#5ac1fe"),
-		Inactive:   lipgloss.Color("#bfbdb6"),
-		File:       lipgloss.Color("#8a8986"),
-		Folder:     lipgloss.Color("#bfbdb6"),
-		BottomBar:  lipgloss.Color("#131721"),
-	}
-	AyuLight = Theme{
-		Name:       "Ayu Light",
-		Background: lipgloss.Color("#fafafa"),
-		Border:     lipgloss.Color("#d9d9d9"),
-		Active:     lipgloss.Color("#ff9940"),
-		Inactive:   lipgloss.Color("#5c6773"),
-		File:       lipgloss.Color("#5c6773"),
-		Folder:     lipgloss.Color("#36a3d9"),
-		BottomBar:  lipgloss.Color("#f0f0f0"),
-	}
-	AyuMirage = Theme{
-		Name:       "Ayu Mirage",
-		Background: lipgloss.Color("#1f2430"),
-		Border:     lipgloss.Color("#33415e"),
-		Active:     lipgloss.Color("#ffcc66"),
-		Inactive:   lipgloss.Color("#707a8c"),
-		File:       lipgloss.Color("#cbccc6"),
-		Folder:     lipgloss.Color("#ffa759"),
-		BottomBar:  lipgloss.Color("#191e2a"),
-	}
-)
-
-type model struct {
-	bridge        *Bridge
-	err           error
-	width         int
-	height        int
-	active        string // "files", "editor", "terminal"
-	rootNode      FileNode
-	cursor        int
-	flatTree      []FlatNode
-	textarea      textarea.Model
-	terminalLog   viewport.Model
-	terminalBuf   *strings.Builder
-	terminalInput string
-	currentPath   string
-	hasChanges    bool
-	expanded      map[string]bool
-	gitBranch     string
-	gitDirty      bool
-	promptMode    string // "none", "new", "delete", "rename", "search"
-	promptValue   string
-	searchResults []SearchResult
-	searchCursor  int
-	themeIdx      int
-	themes        []Theme
-}
-
-func (m model) currentTheme() Theme {
-	return m.themes[m.themeIdx]
-}
-
-type FlatNode struct {
-	FileNode
-	Depth int
-}
-
-func flattenTree(node FileNode, depth int, expanded map[string]bool) []FlatNode {
-	res := []FlatNode{{FileNode: node, Depth: depth}}
-	if node.IsDir && expanded[node.Path] {
-		for _, child := range node.Children {
-			res = append(res, flattenTree(child, depth+1, expanded)...)
-		}
-	}
-	return res
-}
-
-type GitBranch struct {
+type GitInfo struct {
+	Status string `json:"status"`
 	Branch string `json:"branch"`
+	Dirty  bool   `json:"dirty"`
 }
 
-type GitStatus struct {
-	Dirty bool `json:"dirty"`
-}
-
-type SearchResults struct {
-	Results []SearchResult `json:"results"`
+type GlobalSearchResults struct {
+	Results []GlobalResult `json:"results"`
 }
 
 func fetchFileTree(b *Bridge, path string) tea.Cmd {
 	return func() tea.Msg {
 		res, err := b.Call("get_file_tree", map[string]string{"path": path})
-		if err != nil {
-			return err
-		}
+		if err != nil { return err }
 		var result struct {
 			Status string   `json:"status"`
 			Tree   FileNode `json:"tree"`
 		}
-		if err := json.Unmarshal(res, &result); err != nil {
-			return err
-		}
+		json.Unmarshal(res, &result)
 		return result.Tree
 	}
 }
@@ -169,16 +194,12 @@ func fetchFileTree(b *Bridge, path string) tea.Cmd {
 func readFile(b *Bridge, path string) tea.Cmd {
 	return func() tea.Msg {
 		res, err := b.Call("read_file", map[string]string{"path": path})
-		if err != nil {
-			return err
-		}
+		if err != nil { return err }
 		var result struct {
 			Status  string `json:"status"`
 			Content string `json:"content"`
 		}
-		if err := json.Unmarshal(res, &result); err != nil {
-			return err
-		}
+		json.Unmarshal(res, &result)
 		return FileContent{Path: path, Content: result.Content}
 	}
 }
@@ -186,53 +207,8 @@ func readFile(b *Bridge, path string) tea.Cmd {
 func saveFile(b *Bridge, path, content string) tea.Cmd {
 	return func() tea.Msg {
 		_, err := b.Call("save_file", map[string]string{"path": path, "content": content})
-		if err != nil {
-			return err
-		}
+		if err != nil { return err }
 		return "saved"
-	}
-}
-
-func waitForEvents(b *Bridge) tea.Cmd {
-	return func() tea.Msg {
-		return <-b.Events()
-	}
-}
-
-func spawnTerminal(b *Bridge, rows, cols int) tea.Cmd {
-	return func() tea.Msg {
-		_, err := b.Call("terminal_spawn", map[string]int{"rows": rows, "cols": cols})
-		if err != nil {
-			return err
-		}
-		return "terminal_spawned"
-	}
-}
-
-func writeTerminal(b *Bridge, data string) tea.Cmd {
-	return func() tea.Msg {
-		_, err := b.Call("terminal_write", map[string]string{"data": data})
-		if err != nil {
-			return err
-		}
-		return nil
-	}
-}
-
-func fetchGitInfo(b *Bridge) tea.Cmd {
-	return func() tea.Msg {
-		res, _ := b.Call("get_git_branch", map[string]string{"path": "."})
-		var branch GitBranch
-		json.Unmarshal(res, &branch)
-
-		res, _ = b.Call("get_git_status", map[string]string{"path": "."})
-		var status GitStatus
-		json.Unmarshal(res, &status)
-
-		return tea.Batch(
-			func() tea.Msg { return branch },
-			func() tea.Msg { return status },
-		)()
 	}
 }
 
@@ -252,21 +228,63 @@ func deleteFile(b *Bridge, path string) tea.Cmd {
 
 func renameFile(b *Bridge, old, new string) tea.Cmd {
 	return func() tea.Msg {
-		b.Call("rename_file", map[string]string{"old": old, "new": new})
+		b.Call("rename_file", map[string]string{"old_path": old, "new_path": new})
 		return fetchFileTree(b, ".")()
 	}
 }
 
-func searchFiles(b *Bridge, query string) tea.Cmd {
+func fetchGitInfo(b *Bridge) tea.Cmd {
+	return func() tea.Msg {
+		res, _ := b.Call("get_git_branch", map[string]string{"path": "."})
+		var info GitInfo
+		json.Unmarshal(res, &info)
+		return info
+	}
+}
+
+func globalSearch(b *Bridge, query string) tea.Cmd {
 	return func() tea.Msg {
 		res, _ := b.Call("search_files", map[string]string{"root": ".", "query": query})
 		var result struct {
-			Results []SearchResult `json:"results"`
+			Status  string         `json:"status"`
+			Results []GlobalResult `json:"results"`
 		}
 		json.Unmarshal(res, &result)
-		return SearchResults{Results: result.Results}
+		return GlobalSearchResults{Results: result.Results}
 	}
 }
+
+func spawnTerminal(b *Bridge, rows, cols int) tea.Cmd {
+	return func() tea.Msg {
+		b.Call("terminal_spawn", map[string]int{"rows": rows, "cols": cols})
+		return "terminal_spawned"
+	}
+}
+
+func writeTerminal(b *Bridge, data string) tea.Cmd {
+	return func() tea.Msg {
+		b.Call("terminal_write", map[string]string{"data": data})
+		return nil
+	}
+}
+
+func waitForEvents(b *Bridge) tea.Cmd {
+	return func() tea.Msg {
+		return <-b.Events()
+	}
+}
+
+type blinkMsg struct{}
+
+func tickCmd() tea.Cmd {
+	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
+		return blinkMsg{}
+	})
+}
+
+// ==============================================================================
+// Model Implementation
+// ==============================================================================
 
 func initialModel() model {
 	b, _ := NewBridge("python")
@@ -281,21 +299,41 @@ func initialModel() model {
 		textarea: ta,
 		terminalLog: vp,
 		terminalBuf: &strings.Builder{},
-		expanded: make(map[string]bool),
-		themes:   []Theme{AyuDark, AyuLight, AyuMirage},
+		terminalHistIdx: -1,
+		expanded: map[string]bool{".": true},
 		themeIdx: 0,
+		fileTreeVisible: true,
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	m.expanded["."] = true
 	return tea.Batch(
 		fetchFileTree(m.bridge, "."),
 		spawnTerminal(m.bridge, 24, 80),
 		fetchGitInfo(m.bridge),
 		waitForEvents(m.bridge),
 		textarea.Blink,
+		tickCmd(),
 	)
+}
+
+func findMatches(content, query string) []SearchMatch {
+	var matches []SearchMatch
+	if query == "" { return matches }
+	lines := strings.Split(content, "\n")
+	qLower := strings.ToLower(query)
+	for row, line := range lines {
+		lineLower := strings.ToLower(line)
+		col := 0
+		for {
+			idx := strings.Index(lineLower[col:], qLower)
+			if idx == -1 { break }
+			abs := col + idx
+			matches = append(matches, SearchMatch{row, abs, abs + len(query)})
+			col = abs + 1
+		}
+	}
+	return matches
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -305,6 +343,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	)
 
 	switch msg := msg.(type) {
+	case blinkMsg:
+		m.cursorBlink = !m.cursorBlink
+		return m, tickCmd()
 	case RPCEvent:
 		if msg.Event == "terminal_data" {
 			var td TerminalData
@@ -317,20 +358,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForEvents(m.bridge)
 	case FileNode:
 		m.rootNode = msg
-		m.flatTree = flattenTree(m.rootNode, 0, m.expanded)
+		m.flatTree = flattenVisible(m.rootNode, m.expanded, 0)
 	case FileContent:
 		m.currentPath = msg.Path
 		m.textarea.SetValue(msg.Content)
 		m.hasChanges = false
 		m.active = "editor"
 		m.textarea.Focus()
-	case GitBranch:
+		ext := filepath.Ext(m.currentPath)
+		if lang, ok := langMap[ext]; ok {
+			m.currentLang = lang
+		} else {
+			m.currentLang = "Plain Text"
+		}
+	case GitInfo:
 		m.gitBranch = msg.Branch
-	case GitStatus:
 		m.gitDirty = msg.Dirty
-	case SearchResults:
-		m.searchResults = msg.Results
-		m.searchCursor = 0
+	case GlobalSearchResults:
+		m.globalSearchResults = msg.Results
+		m.globalSearchIdx = 0
 	case string:
 		if msg == "saved" {
 			m.hasChanges = false
@@ -341,146 +387,210 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.textarea.SetWidth(m.width / 2) // Approximate, View will handle precision
-		m.textarea.SetHeight(m.height - 3)
-		m.terminalLog.Width = m.width / 2
-		m.terminalLog.Height = m.height - 3
 	case tea.MouseMsg:
-		if msg.Type == tea.MouseLeft {
-			filesWidth := m.width / 5
-			editorStart := filesWidth + 1
-			editorWidth := (m.width - filesWidth - 2) / 2
-			terminalStart := editorStart + editorWidth + 1
+		filesWidth := m.filesWidth
+		if filesWidth == 0 { filesWidth = m.width / 5 }
+		divW := 1
+		remaining := m.width - filesWidth - (divW * 2)
+		editorWidth := m.editorWidth
+		if editorWidth == 0 { editorWidth = remaining / 2 }
+		editorStart := filesWidth + divW
+		termStart := editorStart + editorWidth + divW
 
-			if msg.X < filesWidth {
-				m.active = "files"
-				m.textarea.Blur()
-			} else if msg.X >= editorStart && msg.X < terminalStart {
-				m.active = "editor"
-				m.textarea.Focus()
-			} else if msg.X >= terminalStart {
-				m.active = "terminal"
-				m.textarea.Blur()
+		if msg.Type == tea.MouseLeft {
+			if msg.Action == tea.MouseActionPress {
+				// Focus panels
+				if !m.zenMode {
+					switch {
+					case msg.X < filesWidth:
+						m.active = "files"
+						m.textarea.Blur()
+					case msg.X >= editorStart && msg.X < termStart:
+						m.active = "editor"
+						m.textarea.Focus()
+					case msg.X >= termStart:
+						m.active = "terminal"
+						m.textarea.Blur()
+					}
+				}
+				
+				// Divider dragging
+				if !m.zenMode {
+					if msg.X == filesWidth {
+						m.dragging = true
+						m.dragDivider = 1
+						m.dragStartX = msg.X
+					} else if msg.X == termStart-1 { // editor|terminal divider
+						m.dragging = true
+						m.dragDivider = 2
+						m.dragStartX = msg.X
+					}
+				}
+			} else if msg.Action == tea.MouseActionMotion && m.dragging {
+				if m.dragDivider == 1 {
+					m.filesWidth = msg.X
+				} else {
+					// This logic is simplified, needs careful calculation for editorWidth
+					m.editorWidth = msg.X - editorStart
+				}
+			} else if msg.Action == tea.MouseActionRelease {
+				m.dragging = false
 			}
 		}
 	case tea.KeyMsg:
-		// Prompt handling
-		if m.promptMode != "none" {
+		// Overlays
+		if m.helpOpen {
+			if msg.String() == "f1" || msg.String() == "esc" {
+				m.helpOpen = false
+			}
+			return m, nil
+		}
+		
+		if m.overlayMode != "" {
 			switch msg.String() {
 			case "esc":
-				m.promptMode = "none"
-				m.promptValue = ""
+				m.overlayMode = ""
+				m.overlayInput = ""
 			case "enter":
-				mode := m.promptMode
-				val := m.promptValue
-				m.promptMode = "none"
-				m.promptValue = ""
+				mode := m.overlayMode
+				input := m.overlayInput
+				m.overlayMode = ""
+				m.overlayInput = ""
 				switch mode {
-				case "new":
-					return m, createFile(m.bridge, val)
-				case "delete":
-					if val == "y" || val == "Y" {
-						node := m.flatTree[m.cursor]
-						return m, deleteFile(m.bridge, node.Path)
+				case "new_file": return m, createFile(m.bridge, input)
+				case "rename": return m, renameFile(m.bridge, m.currentPath, input)
+				case "delete_confirm":
+					if input == "y" || input == "Y" {
+						return m, deleteFile(m.bridge, m.flatTree[m.cursor].Path)
 					}
-				case "rename":
-					node := m.flatTree[m.cursor]
-					return m, renameFile(m.bridge, node.Path, val)
-				case "search":
-					if len(m.searchResults) > 0 {
-						res := m.searchResults[m.searchCursor]
-						return m, readFile(m.bridge, res.File)
-					}
+				case "open_folder":
+					return m, tea.Batch(
+						fetchFileTree(m.bridge, input),
+						func() tea.Msg { return "folder_opened" },
+					)
+				case "quit_confirm":
+					if input == "y" || input == "Y" { return m, tea.Quit }
 				}
 			case "backspace":
-				if len(m.promptValue) > 0 {
-					m.promptValue = m.promptValue[:len(m.promptValue)-1]
-				}
-				if m.promptMode == "search" {
-					return m, searchFiles(m.bridge, m.promptValue)
-				}
-			case "up":
-				if m.promptMode == "search" && m.searchCursor > 0 {
-					m.searchCursor--
-				}
-			case "down":
-				if m.promptMode == "search" && m.searchCursor < len(m.searchResults)-1 {
-					m.searchCursor++
-				}
+				if len(m.overlayInput) > 0 { m.overlayInput = m.overlayInput[:len(m.overlayInput)-1] }
 			default:
 				if msg.Type == tea.KeyRunes || msg.String() == " " {
-					m.promptValue += msg.String()
-					if m.promptMode == "search" {
-						return m, searchFiles(m.bridge, m.promptValue)
-					}
+					m.overlayInput += msg.String()
 				}
 			}
 			return m, nil
 		}
 
-		// Global keys
-		switch msg.String() {
-		case "ctrl+c":
-			if m.active == "terminal" {
-				return m, writeTerminal(m.bridge, "\x03")
-			}
-			if m.bridge != nil {
-				m.bridge.Close()
-			}
-			return m, tea.Quit
-		case "ctrl+t":
-			m.themeIdx = (m.themeIdx + 1) % len(m.themes)
-			return m, nil
-		case "ctrl+f":
-			m.promptMode = "search"
-			m.searchResults = nil
-			return m, nil
-		case "ctrl+n":
-			m.promptMode = "new"
-			return m, nil
-		case "f2":
-			if m.active == "files" && len(m.flatTree) > 0 {
-				m.promptMode = "rename"
-				m.promptValue = m.flatTree[m.cursor].Name
+		// Inline search
+		if m.searchOpen {
+			switch msg.String() {
+			case "esc": m.searchOpen = false
+			case "enter":
+				if len(m.searchMatches) > 0 {
+					m.searchIdx = (m.searchIdx + 1) % len(m.searchMatches)
+				}
+			case "backspace":
+				if len(m.searchQuery) > 0 { m.searchQuery = m.searchQuery[:len(m.searchQuery)-1] }
+				m.searchMatches = findMatches(m.textarea.Value(), m.searchQuery)
+				m.searchIdx = 0
+			default:
+				if msg.Type == tea.KeyRunes || msg.String() == " " {
+					m.searchQuery += msg.String()
+					m.searchMatches = findMatches(m.textarea.Value(), m.searchQuery)
+					m.searchIdx = 0
+				}
 			}
 			return m, nil
-		case "delete":
-			if m.active == "files" && len(m.flatTree) > 0 {
-				m.promptMode = "delete"
-				m.promptValue = "" // Reset for confirm
-			}
-			return m, nil
-		case "ctrl+s":
-			if m.currentPath != "" {
-				return m, saveFile(m.bridge, m.currentPath, m.textarea.Value())
-			}
-		case "ctrl+r":
-			return m, tea.Batch(fetchFileTree(m.bridge, "."), fetchGitInfo(m.bridge))
-		case "ctrl+]":
-			switch m.active {
-			case "files":
-				m.active = "editor"
-				m.textarea.Focus()
-			case "editor":
-				m.active = "terminal"
-				m.textarea.Blur()
-			case "terminal":
-				m.active = "files"
+		}
+		
+		// Global Search overlay
+		if m.globalSearchOpen {
+			switch msg.String() {
+			case "esc": m.globalSearchOpen = false
+			case "enter":
+				if len(m.globalSearchResults) > 0 {
+					res := m.globalSearchResults[m.globalSearchIdx]
+					m.globalSearchOpen = false
+					return m, readFile(m.bridge, res.File)
+				}
+			case "up":
+				if m.globalSearchIdx > 0 { m.globalSearchIdx-- }
+			case "down":
+				if m.globalSearchIdx < len(m.globalSearchResults)-1 { m.globalSearchIdx++ }
+			case "backspace":
+				if len(m.globalSearchQuery) > 0 { m.globalSearchQuery = m.globalSearchQuery[:len(m.globalSearchQuery)-1] }
+				return m, globalSearch(m.bridge, m.globalSearchQuery)
+			default:
+				if msg.Type == tea.KeyRunes || msg.String() == " " {
+					m.globalSearchQuery += msg.String()
+					return m, globalSearch(m.bridge, m.globalSearchQuery)
+				}
 			}
 			return m, nil
 		}
 
-		// Terminal input
+		// Global Shortcuts
+		switch msg.String() {
+		case "ctrl+q":
+			if m.hasChanges {
+				m.overlayMode = "quit_confirm"
+				m.overlayTitle = "Unsaved changes. Quit anyway? (y/n)"
+				return m, nil
+			}
+			return m, tea.Quit
+		case "f1": m.helpOpen = true; return m, nil
+		case "ctrl+t": m.themeIdx = (m.themeIdx + 1) % len(Themes); return m, nil
+		case "ctrl+b": m.fileTreeVisible = !m.fileTreeVisible; return m, nil
+		case "ctrl+\\": m.zenMode = !m.zenMode; return m, nil
+		case "ctrl+o": m.overlayMode = "open_folder"; m.overlayTitle = "Open folder path:"; return m, nil
+		case "ctrl+n": m.overlayMode = "new_file"; m.overlayTitle = "New file name:"; return m, nil
+		case "ctrl+f": m.searchOpen = true; m.searchQuery = ""; m.searchMatches = nil; return m, nil
+		case "ctrl+shift+f": m.globalSearchOpen = true; m.globalSearchQuery = ""; m.globalSearchResults = nil; return m, nil
+		case "ctrl+s":
+			if m.currentPath != "" { return m, saveFile(m.bridge, m.currentPath, m.textarea.Value()) }
+		case "ctrl+r": return m, tea.Batch(fetchFileTree(m.bridge, "."), fetchGitInfo(m.bridge))
+		case "ctrl+]":
+			switch m.active {
+			case "files": m.active = "editor"; m.textarea.Focus()
+			case "editor": m.active = "terminal"; m.textarea.Blur()
+			case "terminal": m.active = "files"
+			}
+			return m, nil
+		}
+
+		// Active panel updates
 		if m.active == "terminal" {
 			switch msg.String() {
 			case "enter":
-				input := m.terminalInput + "\r\n"
+				m.terminalHistory = append(m.terminalHistory, m.terminalInput)
+				m.terminalHistIdx = -1
+				cmd := writeTerminal(m.bridge, m.terminalInput+"\r\n")
 				m.terminalInput = ""
-				return m, writeTerminal(m.bridge, input)
-			case "backspace":
-				if len(m.terminalInput) > 0 {
-					m.terminalInput = m.terminalInput[:len(m.terminalInput)-1]
+				return m, cmd
+			case "up":
+				if len(m.terminalHistory) > 0 {
+					if m.terminalHistIdx == -1 { m.terminalHistIdx = len(m.terminalHistory) - 1 } else if m.terminalHistIdx > 0 { m.terminalHistIdx-- }
+					m.terminalInput = m.terminalHistory[m.terminalHistIdx]
 				}
+				return m, nil
+			case "down":
+				if m.terminalHistIdx != -1 {
+					if m.terminalHistIdx < len(m.terminalHistory)-1 {
+						m.terminalHistIdx++
+						m.terminalInput = m.terminalHistory[m.terminalHistIdx]
+					} else {
+						m.terminalHistIdx = -1
+						m.terminalInput = ""
+					}
+				}
+				return m, nil
+			case "ctrl+l":
+				m.terminalBuf.Reset()
+				m.terminalLog.SetContent("")
+				return m, writeTerminal(m.bridge, "clear\r\n")
+			case "ctrl+c": return m, writeTerminal(m.bridge, "\x03")
+			case "backspace":
+				if len(m.terminalInput) > 0 { m.terminalInput = m.terminalInput[:len(m.terminalInput)-1] }
 				return m, nil
 			default:
 				if msg.Type == tea.KeyRunes || msg.String() == " " {
@@ -490,36 +600,43 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Panel specific keys
-		switch m.active {
-		case "files":
+		if m.active == "files" {
 			switch msg.String() {
-			case "up":
-				if m.cursor > 0 {
-					m.cursor--
-				}
-			case "down":
-				if m.cursor < len(m.flatTree)-1 {
-					m.cursor++
-				}
+			case "up": if m.cursor > 0 { m.cursor-- }
+			case "down": if m.cursor < len(m.flatTree)-1 { m.cursor++ }
 			case "enter":
+				node := m.flatTree[m.cursor]
+				if node.IsDir {
+					m.expanded[node.Path] = !m.expanded[node.Path]
+					m.flatTree = flattenVisible(m.rootNode, m.expanded, 0)
+				} else {
+					return m, readFile(m.bridge, node.Path)
+				}
+			case "f2":
 				if len(m.flatTree) > 0 {
-					node := m.flatTree[m.cursor]
-					if node.IsDir {
-						m.expanded[node.Path] = !m.expanded[node.Path]
-						m.flatTree = flattenTree(m.rootNode, 0, m.expanded)
-					} else {
-						return m, readFile(m.bridge, node.Path)
-					}
+					m.overlayMode = "rename"
+					m.overlayTitle = "Rename to:"
+					m.overlayInput = m.flatTree[m.cursor].Name
+				}
+			case "delete":
+				if len(m.flatTree) > 0 {
+					m.overlayMode = "delete_confirm"
+					m.overlayTitle = "Delete " + m.flatTree[m.cursor].Name + "? (y/n)"
 				}
 			}
 		}
+
+		if m.active == "editor" {
+			oldVal := m.textarea.Value()
+			m.textarea, cmd = m.textarea.Update(msg)
+			if m.textarea.Value() != oldVal {
+				m.hasChanges = true
+			}
+			cmds = append(cmds, cmd)
+		}
 	}
 
-	if m.active == "editor" {
-		m.textarea, cmd = m.textarea.Update(msg)
-		cmds = append(cmds, cmd)
-	} else if m.active == "terminal" {
+	if m.active == "terminal" {
 		m.terminalLog, cmd = m.terminalLog.Update(msg)
 		cmds = append(cmds, cmd)
 	}
@@ -530,39 +647,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func renderFileTree(m model, width, height int) string {
 	var s strings.Builder
 	theme := m.currentTheme()
-	
 	for i, fn := range m.flatTree {
-		if i >= height {
-			break
-		}
-
+		if i >= height { break }
 		cursor := "  "
 		style := lipgloss.NewStyle()
 		if i == m.cursor && m.active == "files" {
 			cursor = "> "
 			style = style.Background(theme.Active).Foreground(theme.Background).Bold(true)
 		} else {
-			if fn.IsDir {
-				style = style.Foreground(theme.Folder)
-			} else {
-				style = style.Foreground(theme.File)
-			}
+			if fn.IsDir { style = style.Foreground(theme.Folder) } else { style = style.Foreground(theme.File) }
 		}
-
-		icon := "─ "
+		icon := "  "
 		if fn.IsDir {
-			if m.expanded[fn.Path] {
-				icon = "▼ "
-			} else {
-				icon = "▶ "
-			}
-		}
-
+			if m.expanded[fn.Path] { icon = "▼ " } else { icon = "▶ " }
+		} else { icon = "─ " }
 		indent := strings.Repeat("  ", fn.Depth)
 		line := fmt.Sprintf("%s%s%s%s", cursor, indent, icon, fn.Name)
-		if len(line) > width {
-			line = line[:width]
-		}
+		if len(line) > width { line = line[:width] }
 		s.WriteString(style.Width(width).Render(line) + "\n")
 	}
 	return s.String()
@@ -571,179 +672,175 @@ func renderFileTree(m model, width, height int) string {
 func renderPanelHeader(m model, title string, width int, active bool) string {
 	theme := m.currentTheme()
 	textColor := theme.Inactive
-	if active {
-		textColor = theme.Active
-	}
-
+	if active { textColor = theme.Active }
 	label := fmt.Sprintf(" %s ", title)
 	leftDashes := 2
 	rightDashes := width - leftDashes - len(label)
-	if rightDashes < 0 {
-		rightDashes = 0
-	}
-
-	header := lipgloss.NewStyle().Foreground(theme.Border).Render("──") +
+	if rightDashes < 0 { rightDashes = 0 }
+	return lipgloss.NewStyle().Foreground(theme.Border).Render("──") +
 		lipgloss.NewStyle().Foreground(textColor).Render(label) +
 		lipgloss.NewStyle().Foreground(theme.Border).Render(strings.Repeat("─", rightDashes))
-
-	return header
 }
 
 func (m model) View() string {
-	if m.err != nil {
-		return fmt.Sprintf("Error: %v\n", m.err)
-	}
-	if m.width == 0 || m.height == 0 {
-		return "Initializing..."
-	}
-
+	if m.err != nil { return fmt.Sprintf("Error: %v\n", m.err) }
+	if m.width == 0 || m.height == 0 { return "Initializing..." }
 	theme := m.currentTheme()
-	headerHeight := 1
-	footerHeight := 1
-	mainHeight := m.height - headerHeight - footerHeight
-	
-	filesWidth := m.width / 5
-	dividerWidth := 1
-	remainingWidth := m.width - filesWidth - (dividerWidth * 2)
-	editorWidth := remainingWidth / 2
-	terminalWidth := remainingWidth - editorWidth
 
-	headerStyle := lipgloss.NewStyle().
-		Height(headerHeight).
-		Width(m.width).
-		Background(theme.Background)
+	if m.zenMode {
+		m.textarea.SetWidth(m.width)
+		m.textarea.SetHeight(m.height - 1)
+		view := m.textarea.View()
+		hint := lipgloss.NewStyle().Foreground(theme.Muted).Render("ctrl+\\ exit zen")
+		return view + "\n" + lipgloss.NewStyle().Width(m.width).Align(lipgloss.Right).Render(hint)
+	}
+
+	headerH, footerH := 1, 1
+	mainH := m.height - headerH - footerH
 	
+	filesW := m.filesWidth
+	if filesW == 0 { filesW = m.width / 5 }
+	if !m.fileTreeVisible { filesW = 0 }
+	
+	divW := 1
+	remaining := m.width - filesW - (divW * 2)
+	if !m.fileTreeVisible { remaining = m.width - divW }
+	
+	editorW := m.editorWidth
+	if editorW == 0 { editorW = remaining / 2 }
+	termW := remaining - editorW
+
+	// Header
 	brand := lipgloss.NewStyle().Foreground(theme.Active).Bold(true).Render(" TRIX")
 	folder := lipgloss.NewStyle().Foreground(theme.Inactive).Width(m.width - 25).Align(lipgloss.Center).Render(".")
-	themeName := lipgloss.NewStyle().Foreground(theme.Inactive).Render(theme.Name + " ")
-	header := headerStyle.Render(lipgloss.JoinHorizontal(lipgloss.Left, brand, folder, themeName))
+	themeLabel := lipgloss.NewStyle().Foreground(theme.Inactive).Render(theme.Name + " ")
+	header := lipgloss.NewStyle().Height(headerH).Width(m.width).Background(theme.Background).
+		Render(lipgloss.JoinHorizontal(lipgloss.Left, brand, folder, themeLabel))
 
-	panelStyle := lipgloss.NewStyle().Height(mainHeight).Background(theme.Background)
-	dividerStyle := lipgloss.NewStyle().Width(dividerWidth).Height(mainHeight).Foreground(theme.Border).Background(theme.Background)
-	divider := dividerStyle.Render("│")
-
-	filesHeader := renderPanelHeader(m, "Files", filesWidth, m.active == "files")
-	filesContent := renderFileTree(m, filesWidth, mainHeight-1)
-	filesPanel := panelStyle.Width(filesWidth).Render(lipgloss.JoinVertical(lipgloss.Left, filesHeader, filesContent))
-
-	editorHeader := renderPanelHeader(m, "Editor", editorWidth, m.active == "editor")
-	m.textarea.FocusedStyle.CursorLine = lipgloss.NewStyle().Background(theme.BottomBar)
-	m.textarea.SetWidth(editorWidth)
-	m.textarea.SetHeight(mainHeight - 1)
+	// Panels
+	var panels []string
+	if m.fileTreeVisible {
+		panels = append(panels, lipgloss.NewStyle().Width(filesW).Height(mainH).Background(theme.Background).
+			Render(lipgloss.JoinVertical(lipgloss.Left, renderPanelHeader(m, "Files", filesW, m.active == "files"), renderFileTree(m, filesW, mainH-1))))
+		panels = append(panels, lipgloss.NewStyle().Width(divW).Height(mainH).Foreground(theme.Border).Render("│"))
+	}
+	
+	// Editor with Search
+	m.textarea.SetWidth(editorW)
+	m.textarea.SetHeight(mainH - 1)
 	editorContent := m.textarea.View()
-	editorPanel := panelStyle.Width(editorWidth).Render(lipgloss.JoinVertical(lipgloss.Left, editorHeader, editorContent))
-
-	terminalHeader := renderPanelHeader(m, "Terminal", terminalWidth, m.active == "terminal")
-	m.terminalLog.Width = terminalWidth
-	m.terminalLog.Height = mainHeight - 2
-	terminalContent := m.terminalLog.View()
+	if m.searchOpen {
+		m.textarea.SetHeight(mainH - 2)
+		matchInfo := fmt.Sprintf(" %d of %d ", m.searchIdx+1, len(m.searchMatches))
+		if len(m.searchMatches) == 0 { matchInfo = " No matches " }
+		searchBar := lipgloss.NewStyle().Background(theme.Surface).Width(editorW).Render(
+			lipgloss.NewStyle().Foreground(theme.Active).Render(" Search: ") + m.searchQuery + "█" + 
+			lipgloss.NewStyle().Width(editorW - len(m.searchQuery) - 30).Render("") + 
+			lipgloss.NewStyle().Foreground(theme.Muted).Render(matchInfo + " [Enter] next [Esc] close"),
+		)
+		editorContent = lipgloss.JoinVertical(lipgloss.Left, searchBar, m.textarea.View())
+	}
+	panels = append(panels, lipgloss.NewStyle().Width(editorW).Height(mainH).Background(theme.Background).
+		Render(lipgloss.JoinVertical(lipgloss.Left, renderPanelHeader(m, "Editor", editorW, m.active == "editor"), editorContent)))
 	
-	terminalInput := lipgloss.NewStyle().Foreground(theme.Active).Render("> ") + 
-		m.terminalInput + lipgloss.NewStyle().Foreground(theme.Active).Blink(true).Render("█")
+	panels = append(panels, lipgloss.NewStyle().Width(divW).Height(mainH).Foreground(theme.Border).Render("│"))
 	
-	terminalPanel := panelStyle.Width(terminalWidth).Render(lipgloss.JoinVertical(lipgloss.Left, 
-		terminalHeader, 
-		terminalContent,
-		terminalInput,
-	))
+	// Terminal
+	m.terminalLog.Width, m.terminalLog.Height = termW, mainH - 2
+	termCursor := ""
+	if m.cursorBlink && m.active == "terminal" { termCursor = "█" }
+	termInput := lipgloss.NewStyle().Foreground(theme.Active).Render("> ") + m.terminalInput + termCursor
+	panels = append(panels, lipgloss.NewStyle().Width(termW).Height(mainH).Background(theme.Background).
+		Render(lipgloss.JoinVertical(lipgloss.Left, renderPanelHeader(m, "Terminal", termW, m.active == "terminal"), m.terminalLog.View(), termInput)))
 
-	mainArea := lipgloss.JoinHorizontal(lipgloss.Top,
-		filesPanel,
-		divider,
-		editorPanel,
-		divider,
-		terminalPanel,
-	)
+	mainArea := lipgloss.JoinHorizontal(lipgloss.Top, panels...)
 
-	footerStyle := lipgloss.NewStyle().
-		Height(footerHeight).
-		Width(m.width).
-		Background(theme.BottomBar)
-	
+	// Footer (Status Bar)
 	filename := m.currentPath
-	if filename == "" {
-		filename = "No file"
-	}
+	if filename == "" { filename = "No file" }
+	unsaved := ""
+	if m.hasChanges { unsaved = lipgloss.NewStyle().Foreground(theme.Unsaved).Render(" *") }
 	
-	dirtyIcon := ""
-	if m.gitDirty {
-		dirtyIcon = lipgloss.NewStyle().Foreground(theme.Active).Render(" ●")
-	}
+	val := m.textarea.Value()
+	cursor := m.textarea.Cursor()
+	sub := val[:cursor]
+	line := strings.Count(sub, "\n")
+	col := len(sub) - strings.LastIndex(sub, "\n") - 1
+	if strings.LastIndex(sub, "\n") == -1 { col = len(sub) }
+	cursorPos := fmt.Sprintf(" Ln %d, Col %d ", line+1, col+1)
 	
 	gitInfo := ""
 	if m.gitBranch != "" {
-		gitInfo = fmt.Sprintf("  %s%s", m.gitBranch, dirtyIcon)
+		dot := ""
+		if m.gitDirty { dot = lipgloss.NewStyle().Foreground(theme.Unsaved).Render(" ●") }
+		gitInfo = fmt.Sprintf(" %s%s ", m.gitBranch, dot)
 	}
-
-	line, col := m.textarea.Line(), m.textarea.LineInfo().ColumnOffset
-	cursorPos := fmt.Sprintf(" Ln %d, Col %d ", line+1, col+1)
 
 	leftStatus := lipgloss.JoinHorizontal(lipgloss.Left,
 		lipgloss.NewStyle().Background(theme.Active).Foreground(theme.Background).Bold(true).Render(" TRIX "),
-		lipgloss.NewStyle().Foreground(theme.Active).Render(" "+filename+" "),
+		lipgloss.NewStyle().Foreground(theme.Active).Render(" "+filename+unsaved+" "),
 		lipgloss.NewStyle().Foreground(theme.Inactive).Render(cursorPos),
 		lipgloss.NewStyle().Foreground(theme.Inactive).Render(gitInfo),
+		lipgloss.NewStyle().Foreground(theme.Inactive).Render(" "+m.currentLang+" "),
 	)
-
-	keybindings := lipgloss.NewStyle().Foreground(theme.Inactive).Render(" ^S Save  ^R Reload  ^] Cycle  ^C Quit ")
-	spacerWidth := m.width - lipgloss.Width(leftStatus) - lipgloss.Width(keybindings)
-	if spacerWidth < 0 { spacerWidth = 0 }
-	spacer := lipgloss.NewStyle().Width(spacerWidth).Render("")
-	
-	footer := footerStyle.Render(lipgloss.JoinHorizontal(lipgloss.Left, leftStatus, spacer, keybindings))
+	keyHints := lipgloss.NewStyle().Foreground(theme.Inactive).Render(" ^S Save  ^R Reload  ^] Cycle  ^C Quit ")
+	spacer := lipgloss.NewStyle().Width(m.width - lipgloss.Width(leftStatus) - lipgloss.Width(keyHints)).Render("")
+	footer := lipgloss.NewStyle().Background(theme.BottomBar).Render(lipgloss.JoinHorizontal(lipgloss.Left, leftStatus, spacer, keyHints))
 
 	view := lipgloss.JoinVertical(lipgloss.Left, header, mainArea, footer)
 
-	if m.promptMode == "search" {
-		overlayWidth := m.width - 10
-		overlayHeight := 10
-		overlayStyle := lipgloss.NewStyle().
-			Width(overlayWidth).
-			Height(overlayHeight).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(theme.Active).
-			Background(theme.Background).
-			Padding(0, 1)
-
-		var searchLines []string
-		searchLines = append(searchLines, lipgloss.NewStyle().Foreground(theme.Active).Render("Search: ")+m.promptValue+"█")
-		searchLines = append(searchLines, strings.Repeat("─", overlayWidth-2))
-		
-		for i, res := range m.searchResults {
-			if i >= overlayHeight-3 {
-				break
-			}
-			style := lipgloss.NewStyle().Foreground(theme.Inactive)
-			if i == m.searchCursor {
-				style = style.Foreground(theme.Active).Bold(true).Background(theme.BottomBar)
-			}
-			line := fmt.Sprintf("%s:%d: %s", res.File, res.Line, res.Text)
-			if len(line) > overlayWidth-4 {
-				line = line[:overlayWidth-7] + "..."
-			}
-			searchLines = append(searchLines, style.Render(line))
-		}
-
-		overlay := overlayStyle.Render(strings.Join(searchLines, "\n"))
+	// Overlays
+	if m.globalSearchOpen {
+		w, h := m.width-10, 15
+		overlay := lipgloss.NewStyle().Width(w).Height(h).Border(lipgloss.RoundedBorder()).BorderForeground(theme.Active).Background(theme.Surface).Padding(0, 1).
+			Render(lipgloss.JoinVertical(lipgloss.Left, 
+				lipgloss.NewStyle().Foreground(theme.Active).Render(" Search in Files: ") + m.globalSearchQuery + "█",
+				strings.Repeat("─", w-2),
+				func() string {
+					var lines []string
+					for i, res := range m.globalSearchResults {
+						if len(lines) >= h-4 { break }
+						style := lipgloss.NewStyle().Foreground(theme.Inactive)
+						if i == m.globalSearchIdx { style = style.Foreground(theme.Active).Bold(true).Background(theme.Background) }
+						lines = append(lines, style.Render(fmt.Sprintf("%s:%d %s", res.File, res.Line, res.Text)))
+					}
+					return strings.Join(lines, "\n")
+				}()))
 		view = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, overlay)
-	} else if m.promptMode != "none" {
-		promptText := ""
-		switch m.promptMode {
-		case "new": promptText = "New file name: "
-		case "delete": 
-			nodeName := ""
-			if len(m.flatTree) > m.cursor { nodeName = m.flatTree[m.cursor].Name }
-			promptText = fmt.Sprintf("Delete %s? (y/n): ", nodeName)
-		case "rename": promptText = "Rename to: "
-		}
-		
-		prompt := lipgloss.NewStyle().
-			Background(theme.Active).
-			Foreground(theme.Background).
-			Bold(true).
-			Render(" " + promptText + m.promptValue + "█ ")
-		
-		view = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Bottom, prompt)
+	} else if m.overlayMode != "" {
+		w := 40
+		overlay := lipgloss.NewStyle().Width(w).Border(lipgloss.RoundedBorder()).BorderForeground(theme.Active).Background(theme.Surface).Padding(0, 1).
+			Render(lipgloss.JoinVertical(lipgloss.Left, 
+				" " + m.overlayTitle,
+				lipgloss.NewStyle().Foreground(theme.Active).Render(" > ") + m.overlayInput + "█",
+				lipgloss.NewStyle().Foreground(theme.Muted).Render(" [Enter] confirm   [Esc] cancel")))
+		view = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, overlay)
+	} else if m.helpOpen {
+		helpText := ` Keyboard Shortcuts
+
+ File
+   Ctrl+N  New File         Ctrl+S  Save
+   Ctrl+W  Close File       Ctrl+O  Open Folder
+   F2      Rename File      Delete  Delete File
+
+ Layout
+   Ctrl+]  Cycle Panels     Click   Focus Panel
+   Ctrl+B  Toggle Files     Ctrl+\  Zen Mode
+
+ Editor
+   Ctrl+Z  Undo             Ctrl+Y  Redo
+   Ctrl+A  Select All       Ctrl+F  Search
+   Ctrl+Shift+F Global Search
+
+ Terminal
+   Enter   Run command      Ctrl+C  Interrupt
+   ↑ ↓     History          Ctrl+L  Clear
+
+ General
+   Ctrl+T  Cycle Theme      Ctrl+Q  Quit
+   F1      Close this help`
+		overlay := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(theme.Active).Background(theme.Surface).Padding(0, 1).Render(helpText)
+		view = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, overlay)
 	}
 
 	return view
@@ -752,7 +849,7 @@ func (m model) View() string {
 func main() {
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
-		fmt.Printf("Alas, there's been an error: %v", err)
+		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
 	}
 }
