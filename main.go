@@ -126,26 +126,13 @@ func renderPanel(m model, title, icon string, width, height int, active bool) st
 	if len(lines) > 0 {
 		// Replace the first line (top border) with our custom titled border
 		// ╭─ 📁 Files ──────────╮
-		topBorderRunes := []rune(lines[0])
-		titleRunes := []rune(titleStr)
 		
 		// Style the title part
-		styledTitle := lipgloss.NewStyle().Foreground(titleColor).Render(string(titleRunes))
+		styledTitle := lipgloss.NewStyle().Foreground(titleColor).Render(titleStr)
 		if active {
-			styledTitle = lipgloss.NewStyle().Foreground(activeCol).Bold(true).Render(string(titleRunes))
+			styledTitle = lipgloss.NewStyle().Foreground(activeCol).Bold(true).Render(titleStr)
 		}
 
-		// Reconstruct the top line
-		// ╭─
-		left := string(topBorderRunes[:2])
-		// ╮
-		right := string(topBorderRunes[len(topBorderRunes)-1:])
-		
-		// Fill remaining space with ─
-		// Length of middle = total width - len(left) - len(right)
-		// But we need to account for the styled title length.
-		middleWidth := width - 2 - 1 // approximate
-		
 		// Construct the top line manually to be safe
 		topLine := lipgloss.NewStyle().Foreground(borderColor).Render("╭─") +
 			styledTitle +
