@@ -140,11 +140,15 @@ func (m model) View() string {
 	terminalW := m.width - filesW - editorW // Remaining 40%
 
 	// 1. Header
+	brand := headerStyle.PaddingLeft(1).Render("T  R  I  X")
+	folder := folderStyle.Width(m.width - lipgloss.Width(brand) - 15).Align(lipgloss.Center).Render(m.currentFolder)
+	version := versionStyle.PaddingRight(1).Render("v0.1.0")
+	
 	header := lipgloss.NewStyle().
 		Width(m.width).
 		Height(headerH).
-		Background(bgCol).
-		Render(headerStyle.Render("T R I X"))
+		Background(headerBgCol).
+		Render(lipgloss.JoinHorizontal(lipgloss.Left, brand, folder, version))
 
 	// 2. Main Panels
 	filesHeader := renderHeader(m, "Files", filesW, m.active == "files")
