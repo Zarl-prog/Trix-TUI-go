@@ -132,8 +132,6 @@ func renderPanel(title string, width, height int, active bool, theme Theme, isEd
 	style := lipgloss.NewStyle().
 		Width(width - 2).
 		Height(height - 2).
-		Border(lipgloss.RoundedBorder(), true).
-		BorderForeground(lipgloss.Color(borderColor)).
 		Background(lipgloss.Color(bg))
 
 	// Placeholder content
@@ -153,37 +151,45 @@ func renderPanel(title string, width, height int, active bool, theme Theme, isEd
 		content = lipgloss.JoinVertical(lipgloss.Center, c1, c2)
 	}
 
-	// Center content within the panel
+	// Center content within the panel using lipgloss.Place
 	content = lipgloss.Place(width-2, height-2, lipgloss.Center, lipgloss.Center, content)
 
-	// Render the panel with content
-	rendered := style.Render(content)
-	lines := strings.Split(rendered, "\n")
+	// Render the inner content
+	inner := style.Render(content)
+	
+	// Construct the panel with borders
+	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(borderColor)).Background(lipgloss.Color(bg))
+	
+	// Top border with title: ╭─  Files ─────────╮
+	titleStr := fmt.Sprintf("  %s ", title)
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(titleColor))
+	if active {
+		titleStyle = titleStyle.Bold(true)
+	}
+	styledTitle := titleStyle.Render(titleStr)
+	
+	leftCorner := borderStyle.Render("╭─")
+	rightCorner := borderStyle.Render("╮")
+	
+	visibleTitleLen := lipgloss.Width(styledTitle)
+	dashCount := width - 2 - visibleTitleLen - 1
+	if dashCount < 0 { dashCount = 0 }
+	dashes := borderStyle.Render(strings.Repeat("─", dashCount))
+	
+	topLine := leftCorner + styledTitle + dashes + rightCorner
 
-	if len(lines) > 0 {
-		// Style the title: "   Title   "
-		titleStr := fmt.Sprintf("   %s   ", title)
-		titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(titleColor))
-		if active {
-			titleStyle = titleStyle.Bold(true)
-		}
-		styledTitle := titleStyle.Render(titleStr)
-
-		// Top border components
-		borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(borderColor)).Background(lipgloss.Color(bg))
-		
-		leftCorner := borderStyle.Render("╭─")
-		rightCorner := borderStyle.Render("╮")
-		
-		visibleTitleLen := lipgloss.Width(styledTitle)
-		dashCount := width - 2 - visibleTitleLen - 1
-		if dashCount < 0 { dashCount = 0 }
-		dashes := borderStyle.Render(strings.Repeat("─", dashCount))
-
-		lines[0] = leftCorner + styledTitle + dashes + rightCorner
+	// Middle lines: │ content │
+	sideBorder := borderStyle.Render("│")
+	lines := strings.Split(inner, "\n")
+	var middleArea strings.Builder
+	for _, line := range lines {
+		middleArea.WriteString(sideBorder + line + sideBorder + "\n")
 	}
 
-	return strings.Join(lines, "\n")
+	// Bottom line: ╰───────────╯
+	bottomLine := borderStyle.Render("╰" + strings.Repeat("─", width-2) + "╯")
+
+	return topLine + "\n" + middleArea.String() + bottomLine
 }
 
 func (m model) View() string {
@@ -194,9 +200,11 @@ func (m model) View() string {
 	t := m.currentTheme
 
 	// Dimensions
-	headerH := 2 
-	footerH := 2 
-	mainH := m.height - headerH - footerH
+	headerH := 1 
+	headerSepH := 1
+	footerH := 1 
+	footerSepH := 1
+	mainH := m.height - headerH - headerSepH - footerH - footerSepH
 	gap := 1
 
 	// Widths: 20%, 45%, 35%
@@ -204,16 +212,16 @@ func (m model) View() string {
 	editorW := (m.width * 45) / 100
 	terminalW := m.width - filesW - editorW - (gap * 2)
 
-	// Styles defined per render
-	logoTStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)).Bold(true)
-	logoRStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.AccentAlt)).Bold(true)
-	logoIStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.AccentAlt)).Bold(true)
-	logoXStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)).Bold(true)
+	// Header Styles
+	logoTStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)).Bold(true).Background(lipgloss.Color(t.SurfaceAlt))
+	logoRStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.AccentAlt)).Bold(true).Background(lipgloss.Color(t.SurfaceAlt))
+	logoIStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.AccentAlt)).Bold(true).Background(lipgloss.Color(t.SurfaceAlt))
+	logoXStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)).Bold(true).Background(lipgloss.Color(t.SurfaceAlt))
 	
-	sepStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border))
-	folderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.AccentAlt))
-	themeNameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.TextMuted)).PaddingRight(1)
-	versionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.TextMuted)).PaddingRight(1)
+	sepStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Background(lipgloss.Color(t.SurfaceAlt))
+	folderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.AccentAlt)).Background(lipgloss.Color(t.SurfaceAlt))
+	themeNameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.TextMuted)).Background(lipgloss.Color(t.SurfaceAlt)).PaddingRight(1)
+	versionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.TextMuted)).Background(lipgloss.Color(t.SurfaceAlt)).PaddingRight(1)
 
 	// --- 1. HEADER ---
 	logoT := logoTStyle.Render(" T ")
@@ -238,7 +246,7 @@ func (m model) View() string {
 		Background(lipgloss.Color(t.SurfaceAlt)).
 		Render(lipgloss.JoinHorizontal(lipgloss.Left, logo, sep, folder, rightInfo))
 	
-	headerSep := sepStyle.Width(m.width).Render(strings.Repeat("─", m.width))
+	headerSep := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Background(lipgloss.Color(t.Background)).Width(m.width).Render(strings.Repeat("─", m.width))
 	header := lipgloss.JoinVertical(lipgloss.Left, headerContent, headerSep)
 
 	// --- 2. MAIN AREA ---
@@ -257,10 +265,10 @@ func (m model) View() string {
 	)
 
 	// --- 3. STATUS BAR ---
-	statusBrandStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)).Bold(true)
-	statusActiveStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.AccentAlt))
+	statusBrandStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)).Bold(true).Background(lipgloss.Color(t.SurfaceAlt))
+	statusActiveStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.AccentAlt)).Background(lipgloss.Color(t.SurfaceAlt))
 	pillStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color(t.SurfaceAlt)).
+		Background(lipgloss.Color(t.Surface)).
 		Border(lipgloss.NormalBorder(), false, true, false, true).
 		BorderForeground(lipgloss.Color(t.Border)).
 		Padding(0, 1).
@@ -285,7 +293,7 @@ func (m model) View() string {
 
 	remainingStatusW := m.width - lipgloss.Width(statusBrand) - lipgloss.Width(statusSep) - lipgloss.Width(statusActive) - lipgloss.Width(pills)
 	if remainingStatusW < 0 { remainingStatusW = 0 }
-	statusSpacer := lipgloss.NewStyle().Width(remainingStatusW).Render("")
+	statusSpacer := lipgloss.NewStyle().Width(remainingStatusW).Background(lipgloss.Color(t.SurfaceAlt)).Render("")
 	
 	footerContent := lipgloss.NewStyle().
 		Width(m.width).
@@ -293,7 +301,7 @@ func (m model) View() string {
 		Background(lipgloss.Color(t.SurfaceAlt)).
 		Render(lipgloss.JoinHorizontal(lipgloss.Left, statusBrand, statusSep, statusActive, statusSpacer, pills))
 	
-	footerSep := sepStyle.Width(m.width).Render(strings.Repeat("─", m.width))
+	footerSep := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Background(lipgloss.Color(t.Background)).Width(m.width).Render(strings.Repeat("─", m.width))
 	footer := lipgloss.JoinVertical(lipgloss.Left, footerSep, footerContent)
 
 	// --- FINAL ASSEMBLY ---
@@ -306,7 +314,6 @@ func (m model) View() string {
 		Background(lipgloss.Color(t.Background)).
 		Render(finalView)
 }
-
 
 func main() {
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
