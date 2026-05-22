@@ -15,38 +15,65 @@ import (
 // ==============================================================================
 
 const (
-	bgCol       = lipgloss.Color("#0a0b0f")
-	headerBgCol = lipgloss.Color("#0d0e14")
-	activeCol   = lipgloss.Color("#5ac1fe")
-	inactiveCol = lipgloss.Color("#1e2130")
-	titleCol    = lipgloss.Color("#bfbdb6")
-	mutedCol    = lipgloss.Color("#4b4c4e")
-	versionCol  = lipgloss.Color("#3f4043")
+	screenBgCol   = lipgloss.Color("#070709")
+	filesBgCol    = lipgloss.Color("#0e0f15")
+	editorBgCol   = lipgloss.Color("#0a0b10")
+	termBgCol      = lipgloss.Color("#0e0f15")
+	headerBgCol   = lipgloss.Color("#050507")
+	statusBarBgCol = lipgloss.Color("#050507")
+
+	activeCol     = lipgloss.Color("#5ac1fe")
+	inactiveCol   = lipgloss.Color("#1a1b26")
+	
+	logoTCol      = lipgloss.Color("#5ac1fe")
+	logoRCol      = lipgloss.Color("#4ba8e0")
+	logoICol      = lipgloss.Color("#3d8fc2")
+	logoXCol      = lipgloss.Color("#5ac1fe")
+	
+	sepCol        = lipgloss.Color("#1a1b26")
+	folderCol     = lipgloss.Color("#3d4166")
+	versionCol    = lipgloss.Color("#2a2b3d")
+	
+	titleActiveCol   = lipgloss.Color("#5ac1fe")
+	titleInactiveCol = lipgloss.Color("#2a2b3d")
+	
+	pillBgCol     = lipgloss.Color("#0e0f15")
+	pillKeyCol    = lipgloss.Color("#5ac1fe")
+	pillDescCol   = lipgloss.Color("#3d4166")
 )
 
 var (
-	headerStyle = lipgloss.NewStyle().
-			Foreground(activeCol).
-			Bold(true).
-			Background(headerBgCol)
+	// Header Styles
+	logoTStyle = lipgloss.NewStyle().Foreground(logoTCol).Bold(true)
+	logoRStyle = lipgloss.NewStyle().Foreground(logoRCol).Bold(true)
+	logoIStyle = lipgloss.NewStyle().Foreground(logoICol).Bold(true)
+	logoXStyle = lipgloss.NewStyle().Foreground(logoXCol).Bold(true)
+	
+	sepStyle    = lipgloss.NewStyle().Foreground(sepCol)
+	folderStyle = lipgloss.NewStyle().Foreground(folderCol)
+	versionStyle = lipgloss.NewStyle().Foreground(versionCol)
 
-	folderStyle = lipgloss.NewStyle().
-			Foreground(mutedCol).
-			Background(headerBgCol)
+	// Panel Styles
+	activePanelStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(activeCol).
+			Padding(1)
 
-	versionStyle = lipgloss.NewStyle().
-			Foreground(versionCol).
-			Background(headerBgCol)
+	inactivePanelStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(inactiveCol).
+			Padding(1)
 
+	// Status Bar Styles
+	statusBrandStyle = lipgloss.NewStyle().Foreground(activeCol).Bold(true)
+	statusActiveStyle = lipgloss.NewStyle().Foreground(folderCol)
+	
 	pillStyle = lipgloss.NewStyle().
-			Background(inactiveCol).
-			Foreground(activeCol).
+			Background(pillBgCol).
+			Border(lipgloss.NormalBorder(), false, true, false, true).
+			BorderForeground(inactiveCol).
 			Padding(0, 1).
 			MarginLeft(1)
-
-	basePanelStyle = lipgloss.NewStyle().
-			Padding(0, 1).
-			Background(bgCol)
 )
 
 // ==============================================================================
