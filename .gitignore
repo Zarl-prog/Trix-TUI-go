@@ -13,3 +13,7 @@
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
+
+# MemPalace per-project files (issue #185)
+mempalace.yaml
+entities.json
