@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,70 +12,37 @@ import (
 )
 
 // ==============================================================================
-// Constants & Styling
+// Config Persistence
 // ==============================================================================
 
-const (
-	screenBgCol   = lipgloss.Color("#070709")
-	filesBgCol    = lipgloss.Color("#0e0f15")
-	editorBgCol   = lipgloss.Color("#0a0b10")
-	termBgCol      = lipgloss.Color("#0e0f15")
-	headerBgCol   = lipgloss.Color("#050507")
-	statusBarBgCol = lipgloss.Color("#050507")
+type Config struct {
+	Theme string `json:"theme"`
+}
 
-	activeCol     = lipgloss.Color("#5ac1fe")
-	inactiveCol   = lipgloss.Color("#1a1b26")
-	
-	logoTCol      = lipgloss.Color("#5ac1fe")
-	logoRCol      = lipgloss.Color("#4ba8e0")
-	logoICol      = lipgloss.Color("#3d8fc2")
-	logoXCol      = lipgloss.Color("#5ac1fe")
-	
-	sepCol        = lipgloss.Color("#1a1b26")
-	folderCol     = lipgloss.Color("#3d4166")
-	versionCol    = lipgloss.Color("#2a2b3d")
-	
-	titleActiveCol   = lipgloss.Color("#5ac1fe")
-	titleInactiveCol = lipgloss.Color("#2a2b3d")
-	
-	pillBgCol     = lipgloss.Color("#0e0f15")
-	pillKeyCol    = lipgloss.Color("#5ac1fe")
-	pillDescCol   = lipgloss.Color("#3d4166")
-)
+func getConfigFile() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".trix", "config.json")
+}
 
-var (
-	// Header Styles
-	logoTStyle = lipgloss.NewStyle().Foreground(logoTCol).Bold(true)
-	logoRStyle = lipgloss.NewStyle().Foreground(logoRCol).Bold(true)
-	logoIStyle = lipgloss.NewStyle().Foreground(logoICol).Bold(true)
-	logoXStyle = lipgloss.NewStyle().Foreground(logoXCol).Bold(true)
-	
-	sepStyle    = lipgloss.NewStyle().Foreground(sepCol)
-	folderStyle = lipgloss.NewStyle().Foreground(folderCol)
-	versionStyle = lipgloss.NewStyle().Foreground(versionCol)
+func loadConfig() Config {
+	file := getConfigFile()
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return Config{Theme: "Ayu Dark"}
+	}
+	var cfg Config
+	json.Unmarshal(data, &cfg)
+	return cfg
+}
 
-	// Panel Styles
-	activePanelStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(activeCol).
-			Padding(1)
-
-	inactivePanelStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(inactiveCol).
-			Padding(1)
-
-	// Status Bar Styles
-	statusBrandStyle = lipgloss.NewStyle().Foreground(activeCol).Bold(true)
-	statusActiveStyle = lipgloss.NewStyle().Foreground(folderCol)
-	
-	pillStyle = lipgloss.NewStyle().
-			Background(pillBgCol).
-			Border(lipgloss.NormalBorder(), false, true, false, true).
-			BorderForeground(inactiveCol).
-			Padding(0, 1).
-			MarginLeft(1)
-)
+func saveConfig(themeName string) {
+	file := getConfigFile()
+	dir := filepath.Dir(file)
+	os.MkdirAll(dir, 0755)
+	cfg := Config{Theme: themeName}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	os.WriteFile(file, data, 0644)
+}
 
 // ==============================================================================
 // Model
@@ -85,13 +53,25 @@ type model struct {
 	height        int
 	active        string // "files", "editor", "terminal"
 	currentFolder string
+	currentTheme  Theme
 }
 
 func initialModel() model {
 	cwd, _ := os.Getwd()
+	cfg := loadConfig()
+	
+	theme := AyuDark
+	for _, t := range Themes {
+		if t.Name == cfg.Theme {
+			theme = t
+			break
+		}
+	}
+
 	return model{
 		active:        "editor",
 		currentFolder: filepath.Base(cwd),
+		currentTheme:  theme,
 	}
 }
 
@@ -111,6 +91,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.active = "editor"
 		case "ctrl+3":
 			m.active = "terminal"
+		case "ctrl+t":
+			// Cycle themes
+			idx := 0
+			for i, t := range Themes {
+				if t.Name == m.currentTheme.Name {
+					idx = (i + 1) % len(Themes)
+					break
+				}
+			}
+			m.currentTheme = Themes[idx]
+			saveConfig(m.currentTheme.Name)
 		}
 
 	case tea.WindowSizeMsg:
@@ -124,12 +115,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // View Helpers
 // ==============================================================================
 
-func renderPanel(title string, width, height int, active bool, bg lipgloss.Color) string {
-	borderColor := inactiveCol
-	titleColor := titleInactiveCol
+func renderPanel(title string, width, height int, active bool, theme Theme, isEditor bool) string {
+	bg := theme.SurfaceAlt
+	if isEditor {
+		bg = theme.Surface
+	}
+
+	borderColor := theme.Border
+	titleColor := theme.TextMuted
 	if active {
-		borderColor = activeCol
-		titleColor = titleActiveCol
+		borderColor = theme.BorderFocused
+		titleColor = theme.Accent
 	}
 
 	// Base panel style
@@ -137,23 +133,23 @@ func renderPanel(title string, width, height int, active bool, bg lipgloss.Color
 		Width(width - 2).
 		Height(height - 2).
 		Border(lipgloss.RoundedBorder(), true).
-		BorderForeground(borderColor).
-		Background(bg)
+		BorderForeground(lipgloss.Color(borderColor)).
+		Background(lipgloss.Color(bg))
 
 	// Placeholder content
 	var content string
 	switch title {
 	case "Files":
-		c1 := lipgloss.NewStyle().Foreground(titleInactiveCol).Render("No folder open")
-		c2 := lipgloss.NewStyle().Foreground(titleInactiveCol).Render("Press Ctrl+O to open")
+		c1 := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.TextMuted)).Render("No folder open")
+		c2 := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.TextMuted)).Render("Press Ctrl+O to open")
 		content = lipgloss.JoinVertical(lipgloss.Center, c1, c2)
 	case "Editor":
-		c1 := lipgloss.NewStyle().Foreground(activeCol).Bold(true).Render("Welcome to TRIX")
-		c2 := lipgloss.NewStyle().Foreground(titleInactiveCol).Render("Open a file to start editing")
+		c1 := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Accent)).Bold(true).Render("Welcome to TRIX")
+		c2 := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.TextMuted)).Render("Open a file to start editing")
 		content = lipgloss.JoinVertical(lipgloss.Center, c1, c2)
 	case "Terminal":
-		c1 := lipgloss.NewStyle().Foreground(titleInactiveCol).Render("Terminal ready")
-		c2 := lipgloss.NewStyle().Foreground(titleInactiveCol).Render("Press Ctrl+3 to focus")
+		c1 := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.TextMuted)).Render("Terminal ready")
+		c2 := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.TextMuted)).Render("Press Ctrl+3 to focus")
 		content = lipgloss.JoinVertical(lipgloss.Center, c1, c2)
 	}
 
@@ -167,17 +163,15 @@ func renderPanel(title string, width, height int, active bool, bg lipgloss.Color
 	if len(lines) > 0 {
 		// Style the title: "   Title   "
 		titleStr := fmt.Sprintf("   %s   ", title)
-		titleStyle := lipgloss.NewStyle().Foreground(titleColor)
+		titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(titleColor))
 		if active {
 			titleStyle = titleStyle.Bold(true)
 		}
 		styledTitle := titleStyle.Render(titleStr)
 
 		// Top border components
-		borderStyle := lipgloss.NewStyle().Foreground(borderColor).Background(bg)
+		borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(borderColor)).Background(lipgloss.Color(bg))
 		
-		// RoundedBorder top-left is ╭, horizontal is ─
-		// We need to reconstruct the top line: ╭─ Title ─────────╮
 		leftCorner := borderStyle.Render("╭─")
 		rightCorner := borderStyle.Render("╮")
 		
@@ -197,9 +191,11 @@ func (m model) View() string {
 		return "Initializing..."
 	}
 
+	t := m.currentTheme
+
 	// Dimensions
-	headerH := 2 // Header + separator line
-	footerH := 2 // Status bar + separator line
+	headerH := 2 
+	footerH := 2 
 	mainH := m.height - headerH - footerH
 	gap := 1
 
@@ -208,8 +204,18 @@ func (m model) View() string {
 	editorW := (m.width * 45) / 100
 	terminalW := m.width - filesW - editorW - (gap * 2)
 
+	// Styles defined per render
+	logoTStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)).Bold(true)
+	logoRStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.AccentAlt)).Bold(true)
+	logoIStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.AccentAlt)).Bold(true)
+	logoXStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)).Bold(true)
+	
+	sepStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border))
+	folderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.AccentAlt))
+	themeNameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.TextMuted)).PaddingRight(1)
+	versionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.TextMuted)).PaddingRight(1)
+
 	// --- 1. HEADER ---
-	// Giant spaced logo: T  R  I  X
 	logoT := logoTStyle.Render(" T ")
 	logoR := logoRStyle.Render(" R ")
 	logoI := logoIStyle.Render(" I ")
@@ -217,28 +223,30 @@ func (m model) View() string {
 	logo := lipgloss.JoinHorizontal(lipgloss.Left, logoT, logoR, logoI, logoX)
 	
 	sep := sepStyle.Render(" │ ")
-	version := versionStyle.PaddingRight(1).Render("v0.1.0")
+	themeName := themeNameStyle.Render(t.Name)
+	version := versionStyle.Render("v0.1.0")
+	rightInfo := lipgloss.JoinHorizontal(lipgloss.Left, themeName, version)
 	
 	// Middle folder name
-	remainingHeaderW := m.width - lipgloss.Width(logo) - lipgloss.Width(sep) - lipgloss.Width(version)
+	remainingHeaderW := m.width - lipgloss.Width(logo) - lipgloss.Width(sep) - lipgloss.Width(rightInfo)
 	if remainingHeaderW < 0 { remainingHeaderW = 0 }
 	folder := folderStyle.Width(remainingHeaderW).Align(lipgloss.Center).Render(strings.ToUpper(m.currentFolder))
 	
 	headerContent := lipgloss.NewStyle().
 		Width(m.width).
 		Height(1).
-		Background(headerBgCol).
-		Render(lipgloss.JoinHorizontal(lipgloss.Left, logo, sep, folder, version))
+		Background(lipgloss.Color(t.SurfaceAlt)).
+		Render(lipgloss.JoinHorizontal(lipgloss.Left, logo, sep, folder, rightInfo))
 	
 	headerSep := sepStyle.Width(m.width).Render(strings.Repeat("─", m.width))
 	header := lipgloss.JoinVertical(lipgloss.Left, headerContent, headerSep)
 
 	// --- 2. MAIN AREA ---
-	filesPanel := renderPanel("Files", filesW, mainH, m.active == "files", filesBgCol)
-	editorPanel := renderPanel("Editor", editorW, mainH, m.active == "editor", editorBgCol)
-	terminalPanel := renderPanel("Terminal", terminalW, mainH, m.active == "terminal", termBgCol)
+	filesPanel := renderPanel("Files", filesW, mainH, m.active == "files", t, false)
+	editorPanel := renderPanel("Editor", editorW, mainH, m.active == "editor", t, true)
+	terminalPanel := renderPanel("Terminal", terminalW, mainH, m.active == "terminal", t, false)
 
-	spacer := lipgloss.NewStyle().Width(gap).Background(screenBgCol).Render("")
+	spacer := lipgloss.NewStyle().Width(gap).Background(lipgloss.Color(t.Background)).Render("")
 
 	mainArea := lipgloss.JoinHorizontal(lipgloss.Top,
 		filesPanel,
@@ -249,14 +257,23 @@ func (m model) View() string {
 	)
 
 	// --- 3. STATUS BAR ---
+	statusBrandStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)).Bold(true)
+	statusActiveStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.AccentAlt))
+	pillStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color(t.SurfaceAlt)).
+		Border(lipgloss.NormalBorder(), false, true, false, true).
+		BorderForeground(lipgloss.Color(t.Border)).
+		Padding(0, 1).
+		MarginLeft(1)
+
 	statusBrand := statusBrandStyle.PaddingLeft(1).Render("TRIX")
 	statusSep := sepStyle.Render(" │ ")
 	statusActive := statusActiveStyle.Render(strings.ToUpper(m.active))
 	
 	// Right side pills
 	renderPill := func(key, desc string) string {
-		k := lipgloss.NewStyle().Foreground(pillKeyCol).Render(key)
-		d := lipgloss.NewStyle().Foreground(pillDescCol).Render(" " + desc)
+		k := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)).Render(key)
+		d := lipgloss.NewStyle().Foreground(lipgloss.Color(t.TextMuted)).Render(" " + desc)
 		return pillStyle.Render(k + d)
 	}
 
@@ -273,7 +290,7 @@ func (m model) View() string {
 	footerContent := lipgloss.NewStyle().
 		Width(m.width).
 		Height(1).
-		Background(statusBarBgCol).
+		Background(lipgloss.Color(t.SurfaceAlt)).
 		Render(lipgloss.JoinHorizontal(lipgloss.Left, statusBrand, statusSep, statusActive, statusSpacer, pills))
 	
 	footerSep := sepStyle.Width(m.width).Render(strings.Repeat("─", m.width))
@@ -286,9 +303,10 @@ func (m model) View() string {
 	return lipgloss.NewStyle().
 		Width(m.width).
 		Height(m.height).
-		Background(screenBgCol).
+		Background(lipgloss.Color(t.Background)).
 		Render(finalView)
 }
+
 
 func main() {
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
