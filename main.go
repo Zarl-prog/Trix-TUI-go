@@ -93,7 +93,6 @@ type model struct {
 	// Files
 	files           []FileEntry
 	fileCursor      int
-	expanded        map[string]bool
 	
 	// Terminal
 	terminalBuf     *strings.Builder
@@ -103,7 +102,7 @@ type model struct {
 	cursorVisible   bool
 	
 	// Overlays
-	overlayMode     string // "", "open_folder", "new_file", "rename", "delete_confirm"
+	overlayMode     string // "", "open_folder", "new_file", "rename", "delete_confirm", "quit_confirm"
 	overlayInput    string
 	overlayTitle    string
 	
@@ -161,13 +160,21 @@ func initialModel() model {
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle().Background(lipgloss.Color(theme.CursorLine))
 	ta.ShowLineNumbers = true
 
+	// Find theme index to match saved config
+	themeIdx := 0
+	for i, t := range Themes {
+		if t.Name == cfg.Theme {
+			themeIdx = i
+			break
+		}
+	}
+
 	return model{
 		active:          "files",
 		currentFolder:   filepath.Base(cwd),
 		currentTheme:    theme,
-		themeIdx:        0,
+		themeIdx:        themeIdx,
 		textarea:        ta,
-		expanded:        map[string]bool{".": true},
 		terminalBuf:     &strings.Builder{},
 		terminalHistIdx: -1,
 		currentLang:     "Plain Text",
@@ -377,6 +384,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.statusMsg = "Saved " + filepath.Base(m.currentPath)
 			m.isError = false
+			m.hasChanges = false
+			// Refresh file listing after new file creation
+			cwd2, _ := os.Getwd()
+			cmds = append(cmds, listDir(m.bridge, cwd2))
 		}
 
 	case runCommandMsg:
@@ -566,6 +577,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						cwd2, _ := os.Getwd()
 						return m, listDir(m.bridge, cwd2)
 					}
+				case "quit_confirm":
+					if strings.ToLower(strings.TrimSpace(path)) == "y" {
+						return m, tea.Quit
+					}
 				}
 				return m, nil
 			case "esc":
@@ -591,15 +606,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.active != "terminal" {
 				return m, tea.Quit
 			}
-		case "ctrl+q":
-			if m.hasChanges {
-				// Show unsaved changes confirm
-				m.overlayMode = "delete_confirm"
-				m.overlayInput = ""
-				m.overlayTitle = "Unsaved changes. Quit anyway? (y/n)"
-				return m, nil
-			}
-			return m, tea.Quit
+	case "ctrl+q":
+		if m.hasChanges {
+			// Show unsaved changes confirm
+			m.overlayMode = "quit_confirm"
+			m.overlayInput = ""
+			m.overlayTitle = "Unsaved changes. Quit anyway? (y/n)"
+			return m, nil
+		}
+		return m, tea.Quit
 		case "ctrl+1":
 			m.active = "files"
 			m.textarea.Blur()
@@ -744,6 +759,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "editor":
 			var cmd tea.Cmd
 			m.textarea, cmd = m.textarea.Update(msg)
+			if m.currentPath != "" {
+				m.hasChanges = true
+			}
 			return m, cmd
 
 		case "terminal":
