@@ -32,6 +32,7 @@ type FileEntry struct {
 }
 
 type listDirMsg struct {
+	Path    string
 	Entries []FileEntry
 	Error   string
 }
@@ -78,6 +79,14 @@ type SearchMatch struct {
 	ColEnd   int
 }
 
+type FileNode struct {
+	Name     string
+	Path     string
+	IsDir    bool
+	Depth    int
+	Children []FileNode
+}
+
 type model struct {
 	width           int
 	height          int
@@ -91,7 +100,9 @@ type model struct {
 	textarea        textarea.Model
 	
 	// Files
-	files           []FileEntry
+	rootNode        FileNode
+	flatTree        []FileNode
+	expanded        map[string]bool
 	fileCursor      int
 	
 	// Terminal
@@ -178,6 +189,7 @@ func initialModel() model {
 		terminalBuf:     &strings.Builder{},
 		terminalHistIdx: -1,
 		currentLang:     "Plain Text",
+		expanded:        map[string]bool{".": true},
 		fileTreeVisible: true,
 		bridge:          b,
 	}
@@ -191,7 +203,7 @@ func listDir(b *Bridge, path string) tea.Cmd {
 	return func() tea.Msg {
 		res, err := b.Call("list_dir", map[string]interface{}{"path": path})
 		if err != nil {
-			return listDirMsg{Error: err.Error()}
+			return listDirMsg{Path: path, Error: err.Error()}
 		}
 		var data struct {
 			Status  string      `json:"status"`
@@ -200,9 +212,9 @@ func listDir(b *Bridge, path string) tea.Cmd {
 		}
 		json.Unmarshal(res, &data)
 		if data.Status == "error" {
-			return listDirMsg{Error: data.Message}
+			return listDirMsg{Path: path, Error: data.Message}
 		}
-		return listDirMsg{Entries: data.Entries}
+		return listDirMsg{Path: path, Entries: data.Entries}
 	}
 }
 
@@ -330,6 +342,52 @@ func findMatches(content, query string) []SearchMatch {
 	return matches
 }
 
+func flattenVisible(node FileNode, expanded map[string]bool, depth int) []FileNode {
+	node.Depth = depth
+	res := []FileNode{node}
+	if node.IsDir && expanded[node.Path] {
+		for _, child := range node.Children {
+			res = append(res, flattenVisible(child, expanded, depth+1)...)
+		}
+	}
+	return res
+}
+
+func findTreeNode(root *FileNode, path string) *FileNode {
+	if root.Path == path {
+		return root
+	}
+	for i := range root.Children {
+		if found := findTreeNode(&root.Children[i], path); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+func nodeFromEntries(entries []FileEntry) []FileNode {
+	nodes := make([]FileNode, 0, len(entries))
+	for _, e := range entries {
+		nodes = append(nodes, FileNode{
+			Name:  e.Name,
+			Path:  e.Path,
+			IsDir: e.IsDir,
+		})
+	}
+	return nodes
+}
+
+func flattenTree(root FileNode, expanded map[string]bool) []FileNode {
+	if !root.IsDir || !expanded[root.Path] {
+		return nil
+	}
+	var result []FileNode
+	for _, child := range root.Children {
+		result = append(result, flattenVisible(child, expanded, 0)...)
+	}
+	return result
+}
+
 func (m model) Init() tea.Cmd {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -359,8 +417,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "ListDir error: " + msg.Error
 			m.isError = true
 		} else {
-			m.files = msg.Entries
-			m.fileCursor = 0
+			// Update tree: find the node by path, or if this is the root, update rootNode.Children
+			node := findTreeNode(&m.rootNode, msg.Path)
+			if node != nil {
+				node.Children = nodeFromEntries(msg.Entries)
+				// Auto-expand this directory now that children are loaded
+				m.expanded[node.Path] = true
+			} else {
+				// Initial load: set rootNode children
+				m.rootNode = FileNode{
+					Name:  ".",
+					Path:  ".",
+					IsDir: true,
+					Children: nodeFromEntries(msg.Entries),
+				}
+				m.expanded["."] = true
+			}
+			// Rebuild flat tree
+			m.flatTree = flattenTree(m.rootNode, m.expanded)
+			if m.fileCursor >= len(m.flatTree) {
+				m.fileCursor = 0
+			}
 		}
 
 	case readFileMsg:
@@ -571,9 +648,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					}
 				case "delete_confirm":
-					if strings.ToLower(strings.TrimSpace(path)) == "y" && m.fileCursor < len(m.files) {
-						entry := m.files[m.fileCursor]
-						m.bridge.Call("delete_file", map[string]interface{}{"path": entry.Path})
+					if strings.ToLower(strings.TrimSpace(path)) == "y" && m.fileCursor < len(m.flatTree) {
+						node := m.flatTree[m.fileCursor]
+						m.bridge.Call("delete_file", map[string]interface{}{"path": node.Path})
 						cwd2, _ := os.Getwd()
 						return m, listDir(m.bridge, cwd2)
 					}
@@ -740,20 +817,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.fileCursor--
 				}
 			case "down", "j":
-				if m.fileCursor < len(m.files)-1 {
+				if m.fileCursor < len(m.flatTree)-1 {
 					m.fileCursor++
 				}
 			case "enter":
-				if len(m.files) > 0 {
-					entry := m.files[m.fileCursor]
-					if entry.IsDir {
-						return m, listDir(m.bridge, entry.Path)
+				if len(m.flatTree) > 0 {
+					node := m.flatTree[m.fileCursor]
+					if node.IsDir {
+						// If not expanded and children not loaded, fetch them
+						if !m.expanded[node.Path] && (len(node.Children) == 0) {
+							return m, listDir(m.bridge, node.Path)
+						}
+						// Toggle expansion
+						m.expanded[node.Path] = !m.expanded[node.Path]
+						m.flatTree = flattenTree(m.rootNode, m.expanded)
 					} else {
-						return m, readFile(m.bridge, entry.Path)
+						return m, readFile(m.bridge, node.Path)
 					}
 				}
 			case "backspace":
-				return m, listDir(m.bridge, "..")
+				// Collapse current directory or go to parent
+				if len(m.flatTree) > 0 && m.fileCursor < len(m.flatTree) {
+					node := m.flatTree[m.fileCursor]
+					if node.IsDir && m.expanded[node.Path] {
+						m.expanded[node.Path] = false
+						m.flatTree = flattenTree(m.rootNode, m.expanded)
+					} else if m.fileCursor > 0 {
+						m.fileCursor--
+					}
+				}
 			}
 
 		case "editor":
@@ -893,32 +985,40 @@ func renderPanel(title string, width, height int, active bool, theme Theme, cont
 	return topLine + "\n" + middleArea.String() + "\n" + bottomLine
 }
 
-func renderFiles(width, height int, active bool, theme Theme, files []FileEntry, cursor int) string {
+func renderFiles(width, height int, active bool, theme Theme, tree []FileNode, cursor int, expanded map[string]bool) string {
 	innerWidth := width - 2
 	innerHeight := height - 2
 
 	var lines []string
-	for i, f := range files {
+	for i, node := range tree {
 		if len(lines) >= innerHeight { break }
 		
-		prefix := "  "
-		if f.IsDir {
-			prefix = "📁 "
+		indent := strings.Repeat("  ", node.Depth)
+		
+		var prefix string
+		if node.IsDir {
+			if expanded[node.Path] {
+				prefix = "▼ "
+			} else {
+				prefix = "▶ "
+			}
+		} else {
+			prefix = "  "
 		}
 		
-		name := f.Name
-		if lipgloss.Width(name) > innerWidth-4 {
-			name = name[:innerWidth-7] + "..."
+		displayName := indent + prefix + node.Name
+		if lipgloss.Width(displayName) > innerWidth-2 {
+			displayName = displayName[:innerWidth-5] + "..."
 		}
 		
 		style := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Text))
 		if i == cursor && active {
 			style = style.Background(lipgloss.Color(theme.Accent)).Foreground(lipgloss.Color(theme.Background))
-		} else if f.IsDir {
+		} else if node.IsDir {
 			style = style.Foreground(lipgloss.Color(theme.AccentAlt))
 		}
 		
-		line := prefix + name
+		line := displayName
 		lines = append(lines, style.Render(line+strings.Repeat(" ", innerWidth-lipgloss.Width(line))))
 	}
 	
@@ -1129,7 +1229,7 @@ func (m model) View() string {
 	// --- 2. MAIN AREA ---
 	var mainArea string
 	if m.fileTreeVisible {
-		filesPanel := renderFiles(filesW, mainH, m.active == "files", t, m.files, m.fileCursor)
+		filesPanel := renderFiles(filesW, mainH, m.active == "files", t, m.flatTree, m.fileCursor, m.expanded)
 		
 		// Divider
 		divStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Width(gap).Render("│")
