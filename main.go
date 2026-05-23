@@ -204,10 +204,16 @@ func waitForEvent(b *Bridge) tea.Cmd {
 }
 
 func (m model) Init() tea.Cmd {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "."
+	}
+	cwd = sanitizePath(cwd)
+	
 	return tea.Batch(
 		tickCmd(),
 		waitForEvent(m.bridge),
-		listDir(m.bridge, "."),
+		listDir(m.bridge, cwd),
 	)
 }
 
