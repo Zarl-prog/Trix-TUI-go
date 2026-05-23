@@ -84,6 +84,7 @@ type model struct {
 	// Status
 	statusMsg       string
 	isError         bool
+	currentLang     string
 	
 	bridge          *Bridge
 }
@@ -240,6 +241,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.isError = true
 		} else {
 			m.currentPath = msg.Path
+			m.currentLang = detectLanguage(msg.Path)
 			m.textarea.SetValue(msg.Content)
 			m.active = "editor"
 			m.textarea.Focus()
@@ -702,6 +704,48 @@ func renderOverlay(mode, input string, theme Theme) string {
 	)
 	
 	return borderStyle.Render(content)
+}
+
+// ==============================================================================
+// Language Detection
+// ==============================================================================
+
+var langMap = map[string]string{
+	".py": "Python", ".go": "Go", ".js": "JavaScript", ".ts": "TypeScript",
+	".jsx": "JavaScript", ".tsx": "TypeScript", ".rs": "Rust", ".c": "C",
+	".cpp": "C++", ".h": "C", ".hpp": "C++", ".java": "Java",
+	".rb": "Ruby", ".php": "PHP", ".sh": "Bash", ".bash": "Bash",
+	".json": "JSON", ".yaml": "YAML", ".yml": "YAML", ".toml": "TOML",
+	".md": "Markdown", ".html": "HTML", ".htm": "HTML", ".css": "CSS",
+	".sql": "SQL", ".xml": "XML", ".svg": "XML",
+	".ps1": "PowerShell", ".bat": "Batch", ".cmd": "Batch",
+	".zig": "Zig", ".swift": "Swift", ".kt": "Kotlin", ".kts": "Kotlin",
+	".r": "R", ".lua": "Lua", ".pl": "Perl", ".pm": "Perl",
+	".hs": "Haskell", ".ex": "Elixir", ".exs": "Elixir",
+	".vue": "Vue", ".svelte": "Svelte", ".astro": "Astro",
+	".dart": "Dart", ".scala": "Scala", ".clj": "Clojure",
+	".tex": "LaTeX", ".graphql": "GraphQL", ".gql": "GraphQL",
+	".csv": "CSV", ".env": "Env", ".gitignore": "Git",
+	".makefile": "Makefile", ".mk": "Makefile",
+}
+
+func detectLanguage(path string) string {
+	ext := ""
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i] == '.' {
+			ext = path[i:]
+			break
+		}
+	}
+	if lang, ok := langMap[ext]; ok {
+		return lang
+	}
+	// Check whole filename
+	base := filepath.Base(path)
+	if lang, ok := langMap[strings.ToLower(base)]; ok {
+		return lang
+	}
+	return "Plain Text"
 }
 
 // ==============================================================================
