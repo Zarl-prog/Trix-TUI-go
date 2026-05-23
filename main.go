@@ -947,8 +947,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && m.overlayMode == "" && !m.helpOpen && !m.globalSearchOpen {
 			// Calculate layout dimensions for mouse handling
 			gap := 1
-			isAIMode := m.layoutMode == 1 || m.layoutMode == 3
-			
 			filesW := m.width / 5
 			if m.filesWidth > 0 { filesW = m.filesWidth }
 			if !m.fileTreeVisible { filesW = 0 }
