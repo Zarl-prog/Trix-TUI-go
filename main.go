@@ -339,7 +339,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			saveConfig(m.currentTheme.Name)
 		}
 
-		// Panel specific bindings
+		case tea.MouseMsg:
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && m.overlayMode == "" {
+			filesW := (m.width * 20) / 100
+			gap := 1
+			editorW := (m.width * 45) / 100
+			editorStart := filesW + gap
+			termStart := editorStart + editorW + gap
+
+			switch {
+			case msg.X < filesW:
+				m.active = "files"
+				m.textarea.Blur()
+			case msg.X >= editorStart && msg.X < termStart:
+				m.active = "editor"
+				m.textarea.Focus()
+			case msg.X >= termStart:
+				m.active = "terminal"
+				m.textarea.Blur()
+			}
+		}
+
+	// Panel specific bindings
 		switch m.active {
 		case "files":
 			switch msg.String() {
@@ -717,7 +738,7 @@ func saveConfig(themeName string) {
 }
 
 func main() {
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
+	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
