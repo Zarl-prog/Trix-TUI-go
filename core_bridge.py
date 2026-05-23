@@ -6,6 +6,9 @@ from core import files, git, shell
 # Ensure the project root is in sys.path so core can be imported
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import subprocess
+from pathlib import Path
+
 HANDLERS = {
     "list_dir":    lambda r: files.list_dir(r.get("path", ".")),
     "read_file":   lambda r: files.read_file(r.get("path")),
@@ -20,7 +23,52 @@ HANDLERS = {
     "git_show":    lambda r: git.git_show(r.get("hash")),
     "git_diff":    lambda r: git.git_diff(r.get("hash")),
     "run_command": lambda r: shell.run_command(r.get("command"), r.get("cwd")),
+    "get_git_branch": lambda r: get_git_branch(r.get("path", ".")),
+    "search_files":   lambda r: search_files(r.get("root", "."), r.get("query", "")),
 }
+
+
+def get_git_branch(path):
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=path, capture_output=True, text=True, timeout=2
+        )
+        branch = r.stdout.strip()
+        dirty_r = subprocess.run(
+            ["git", "status", "--short"],
+            cwd=path, capture_output=True, text=True, timeout=2
+        )
+        dirty = bool(dirty_r.stdout.strip())
+        return {"status": "ok", "branch": branch, "dirty": dirty}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+def search_files(root, query):
+    results = []
+    try:
+        for fpath in Path(root).rglob("*"):
+            if not fpath.is_file():
+                continue
+            if any(p in str(fpath) for p in [".git", "__pycache__", "node_modules"]):
+                continue
+            try:
+                lines = fpath.read_text(encoding="utf-8", errors="ignore").splitlines()
+            except Exception:
+                continue
+            for i, line in enumerate(lines):
+                if query.lower() in line.lower():
+                    results.append({
+                        "file": str(fpath),
+                        "line": i + 1,
+                        "text": line.strip()[:120]
+                    })
+                    if len(results) >= 200:
+                        return {"status": "ok", "results": results}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    return {"status": "ok", "results": results}
 
 def handle_request(request: dict) -> dict:
     # Support both "method" (JSON-RPC style) and "action" (direct style)
