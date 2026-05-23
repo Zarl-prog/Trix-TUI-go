@@ -63,4 +63,25 @@ var SeaGreen = Theme{
 	Selection:     "#2d3154",
 }
 
-var Themes = []Theme{AyuDark, SeaGreen}
+var AyuMirage = Theme{
+	Name:           "Ayu Mirage",
+	Background:     "#1f2430",
+	Surface:        "#2a2f3a",
+	SurfaceAlt:     "#171b24",
+	Border:         "#3d4251",
+	BorderFocused:  "#5ccfe6",
+	Text:           "#cccac2",
+	TextMuted:      "#686b74",
+	Accent:         "#5ccfe6",
+	AccentAlt:      "#4db8cc",
+	Success:        "#a6d96a",
+	Warning:        "#ffa759",
+	Error:          "#f27983",
+	CursorLine:     "#2a2f3a",
+	LineNumber:     "#454a56",
+	Scrollbar:      "#3d4251",
+	ScrollbarThumb: "#5ccfe6",
+	Selection:      "#3d4251",
+}
+
+var Themes = []Theme{AyuDark, SeaGreen, AyuMirage}
