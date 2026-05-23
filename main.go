@@ -846,6 +846,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.fileCursor--
 					}
 				}
+			case "delete":
+				if len(m.flatTree) > 0 && m.fileCursor < len(m.flatTree) {
+					node := m.flatTree[m.fileCursor]
+					if !node.IsDir {
+						m.overlayMode = "delete_confirm"
+						m.overlayInput = ""
+						m.overlayTitle = "Delete " + node.Name + "? (y/n)"
+					}
+				}
 			}
 
 		case "editor":
