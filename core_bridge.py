@@ -206,6 +206,11 @@ def send_response(id, result):
 def send_event(event, data):
     print(json.dumps({"event": event, "data": data}), flush=True)
 
+def sanitize_path(path: str) -> str:
+    if path is None:
+        return ""
+    return path.replace('\x00', '').strip()
+
 def main():
     for line in sys.stdin:
         try:
@@ -213,6 +218,11 @@ def main():
             method = req.get("method")
             params = req.get("params", {})
             req_id = req.get("id")
+
+            # Sanitize paths in params
+            for k in list(params.keys()):
+                if isinstance(params[k], str) and (k.endswith("path") or k == "root"):
+                    params[k] = sanitize_path(params[k])
 
             if method == "read_file":
                 res = read_file(params.get("path"))
