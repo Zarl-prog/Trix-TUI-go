@@ -214,28 +214,36 @@ def main():
             params = req.get("params", {})
             req_id = req.get("id")
 
-            if method == "get_git_history":
-                res = get_git_history(params.get("path", "."), params.get("count", 50))
-            elif method == "get_git_show":
-                res = get_git_show(params.get("path", "."), params.get("hash"))
-            elif method == "get_git_branch":
-                res = get_git_branch(params.get("path", "."))
-            elif method == "get_git_status":
-                res = get_git_status(params.get("path", "."))
-            elif method == "get_file_tree":
-                res = get_file_tree(params.get("path", "."))
-            elif method == "read_file":
+            if method == "read_file":
                 res = read_file(params.get("path"))
-            elif method == "save_file":
+            elif method == "write_file":
                 res = save_file(params.get("path"), params.get("content"))
+            elif method == "list_dir":
+                path = params.get("path", ".")
+                try:
+                    entries = []
+                    for p in Path(path).iterdir():
+                        entries.append({"name": p.name, "is_dir": p.is_dir(), "path": str(p)})
+                    res = {"status": "ok", "entries": entries}
+                except Exception as e:
+                    res = {"status": "error", "message": str(e)}
             elif method == "create_file":
                 res = create_file(params.get("path"))
             elif method == "delete_file":
                 res = delete_file(params.get("path"))
             elif method == "rename_file":
                 res = rename_file(params.get("old_path"), params.get("new_path"))
-            elif method == "search_files":
-                res = search_files(params.get("root", "."), params.get("query"))
+            elif method == "git_status":
+                res = get_git_branch(params.get("path", "."))
+            elif method == "git_log":
+                res = get_git_history(params.get("path", "."), params.get("count", 50))
+            elif method == "run_command":
+                try:
+                    cmd = params.get("command")
+                    r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+                    res = {"status": "ok", "output": r.stdout + r.stderr}
+                except Exception as e:
+                    res = {"status": "error", "message": str(e)}
             elif method == "terminal_spawn":
                 res = terminal_spawn(params.get("rows", 24), params.get("cols", 80))
             elif method == "terminal_write":
@@ -243,7 +251,32 @@ def main():
             elif method == "quit":
                 break
             else:
-                res = {"status": "error", "message": f"Unknown method: {method}"}
+                # Support "action" as an alias for "method" if sent directly
+                action = req.get("action")
+                if action == "read_file":
+                    res = read_file(params.get("path"))
+                elif action == "write_file":
+                    res = save_file(params.get("path"), params.get("content"))
+                elif action == "list_dir":
+                    path = params.get("path", ".")
+                    try:
+                        entries = []
+                        for p in Path(path).iterdir():
+                            entries.append({"name": p.name, "is_dir": p.is_dir(), "path": str(p)})
+                        res = {"status": "ok", "entries": entries}
+                    except Exception as e:
+                        res = {"status": "error", "message": str(e)}
+                elif action == "git_status":
+                    res = get_git_branch(params.get("path", "."))
+                elif action == "run_command":
+                    try:
+                        cmd = params.get("command")
+                        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+                        res = {"status": "ok", "output": r.stdout + r.stderr}
+                    except Exception as e:
+                        res = {"status": "error", "message": str(e)}
+                else:
+                    res = {"status": "error", "message": f"Unknown method: {method or action}"}
             
             if req_id is not None:
                 send_response(req_id, res)
