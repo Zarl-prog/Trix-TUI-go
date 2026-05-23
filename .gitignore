@@ -17,3 +17,8 @@
 # MemPalace per-project files (issue #185)
 mempalace.yaml
 entities.json
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
