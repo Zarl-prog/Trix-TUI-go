@@ -77,6 +77,10 @@ type model struct {
 	terminalHistIdx int
 	cursorVisible   bool
 	
+	// Overlays
+	overlayMode     string // "", "open_folder"
+	overlayInput    string
+	
 	// Status
 	statusMsg       string
 	isError         bool
@@ -264,6 +268,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForEvent(m.bridge)
 
 	case tea.KeyMsg:
+		if m.overlayMode != "" {
+			switch msg.String() {
+			case "enter":
+				if m.overlayMode == "open_folder" {
+					path := m.overlayInput
+					m.overlayMode = ""
+					m.overlayInput = ""
+					m.currentFolder = filepath.Base(path)
+					return m, listDir(m.bridge, path)
+				}
+			case "esc":
+				m.overlayMode = ""
+				m.overlayInput = ""
+				return m, nil
+			case "backspace":
+				if len(m.overlayInput) > 0 {
+					m.overlayInput = m.overlayInput[:len(m.overlayInput)-1]
+				}
+				return m, nil
+			}
+			if len(msg.String()) == 1 {
+				m.overlayInput += msg.String()
+			}
+			return m, nil
+		}
+
 		// Global bindings
 		switch msg.String() {
 		case "ctrl+c":
@@ -285,6 +315,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.currentPath != "" {
 				return m, writeFile(m.bridge, m.currentPath, m.textarea.Value())
 			}
+		case "ctrl+o":
+			m.overlayMode = "open_folder"
+			m.overlayInput = ""
+			return m, nil
 		case "ctrl+t":
 			// Cycle themes
 			idx := 0
@@ -377,9 +411,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		
 		// Update panel widths for textarea resize
-		filesW := (m.width * 20) / 100
 		editorW := (m.width * 45) / 100
-		gap := 1
 		innerEditorW := editorW - 2
 		mainH := m.height - 4 // header(2) + footer(2)
 		m.textarea.SetWidth(innerEditorW)
@@ -461,7 +493,6 @@ func renderPanel(title string, width, height int, active bool, theme Theme, cont
 }
 
 func renderFiles(width, height int, active bool, theme Theme, files []FileEntry, cursor int) string {
-	bg := theme.SurfaceAlt
 	innerWidth := width - 2
 	innerHeight := height - 2
 
@@ -498,7 +529,6 @@ func renderFiles(width, height int, active bool, theme Theme, files []FileEntry,
 }
 
 func renderTerminal(width, height int, active bool, theme Theme, content string, input string, cursorVisible bool) string {
-	bg := theme.SurfaceAlt
 	innerWidth := width - 2
 	innerHeight := height - 2
 
@@ -554,7 +584,9 @@ func (m model) View() string {
 	gap := 1
 
 	// Widths
+	filesW := (m.width * 20) / 100
 	editorW := (m.width * 45) / 100
+	terminalW := m.width - filesW - editorW - (gap * 2)
 
 	// --- 1. HEADER ---
 	logoStyle := func(color string) lipgloss.Style {
@@ -609,7 +641,40 @@ func (m model) View() string {
 	footerSep := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Width(m.width).Render(strings.Repeat("─", m.width))
 	footer := lipgloss.JoinVertical(lipgloss.Left, footerSep, footerContent)
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, mainArea, footer)
+	finalView := lipgloss.JoinVertical(lipgloss.Left, header, mainArea, footer)
+
+	if m.overlayMode != "" {
+		overlay := lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
+			renderOverlay(m.overlayMode, m.overlayInput, t),
+		)
+		return overlay
+	}
+
+	return finalView
+}
+
+func renderOverlay(mode, input string, theme Theme) string {
+	width := 40
+	title := "Open Folder"
+	if mode == "open_folder" {
+		title = "Open Folder Path:"
+	}
+
+	bg := theme.Surface
+	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Accent)).Background(lipgloss.Color(bg)).Border(lipgloss.RoundedBorder())
+	
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Accent)).Bold(true).Padding(0, 1)
+	inputStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Text)).Background(lipgloss.Color(theme.Background)).Width(width - 4).Padding(0, 1)
+	
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		titleStyle.Render(title),
+		"",
+		inputStyle.Render(input+"█"),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color(theme.TextMuted)).Render(" [Enter] confirm   [Esc] cancel"),
+	)
+	
+	return borderStyle.Render(content)
 }
 
 // ==============================================================================
