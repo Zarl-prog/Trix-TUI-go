@@ -6,8 +6,13 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 	"sync"
 )
+
+func sanitizePath(path string) string {
+	return strings.ReplaceAll(path, "\x00", "")
+}
 
 type RPCRequest struct {
 	Method string      `json:"method"`
@@ -95,6 +100,15 @@ func (b *Bridge) Call(method string, params interface{}) (json.RawMessage, error
 	b.calls[id] = ch
 	b.mu.Unlock()
 
+	// Sanitize paths in params if it's a map
+	if pMap, ok := params.(map[string]interface{}); ok {
+		for k, v := range pMap {
+			if s, ok := v.(string); ok && (strings.Contains(k, "path") || strings.Contains(k, "root")) {
+				pMap[k] = sanitizePath(s)
+			}
+		}
+	}
+
 	req := RPCRequest{
 		Method: method,
 		Params: params,
@@ -112,6 +126,15 @@ func (b *Bridge) Call(method string, params interface{}) (json.RawMessage, error
 }
 
 func (b *Bridge) Send(method string, params interface{}) error {
+	// Sanitize paths in params if it's a map
+	if pMap, ok := params.(map[string]interface{}); ok {
+		for k, v := range pMap {
+			if s, ok := v.(string); ok && (strings.Contains(k, "path") || strings.Contains(k, "root")) {
+				pMap[k] = sanitizePath(s)
+			}
+		}
+	}
+
 	req := RPCRequest{
 		Method: method,
 		Params: params,
