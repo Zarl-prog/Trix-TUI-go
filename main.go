@@ -980,49 +980,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.active = "editor"
 					m.textarea.Focus()
 				case msg.X >= termStart:
-					// Check if click is on AI agent pills in the AI terminal bar
-					aiTermStart := termStart
-					if isAIMode {
-						// Agent bar is first 2 rows of AI terminal panel
-						if msg.Y >= 2 && msg.Y <= 3 {
-							// Calculate which pill was clicked
-							pillX := aiTermStart + 2 // offset for bar border
-							pills := []string{"Claude", "Codex", "Gemini", "Aider", "Custom"}
-							for i, p := range pills {
-								// Each pill is roughly name + 4 chars padding + 2 spacing
-								pillW := lipgloss.Width(p) + 6
-								if msg.X >= pillX && msg.X < pillX+pillW {
-									switch i {
-									case 0:
-										m.aiAgentName = "Claude"
-										m.aiTerminalInput = "claude"
-										return m, m.submitAITerminal()
-									case 1:
-										m.aiAgentName = "Codex"
-										m.aiTerminalInput = "codex"
-										return m, m.submitAITerminal()
-									case 2:
-										m.aiAgentName = "Gemini"
-										m.aiTerminalInput = "gemini"
-										return m, m.submitAITerminal()
-									case 3:
-										m.aiAgentName = "Aider"
-										m.aiTerminalInput = "aider"
-										return m, m.submitAITerminal()
-									case 4:
-										m.aiAgentName = "Custom"
-										m.aiTerminalInput = ""
-										m.statusMsg = "Custom AI agent selected. Type your command."
-										m.isError = false
-										m.active = "terminal"
-										m.textarea.Blur()
-										return m, nil
-									}
-								}
-								pillX += pillW + 1
-							}
-						}
-					}
 					m.active = "terminal"
 					m.textarea.Blur()
 				}
@@ -1034,38 +991,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				switch {
 				case msg.X == divX || msg.X == divX-1:
 					m.dragging = true
-					m.dragDivider = 3 // editor|ai-terminal
+					m.dragDivider = 3
 					m.dragStartX = msg.X
 				case msg.X < editorW:
 					m.active = "editor"
 					m.textarea.Focus()
 				case msg.X >= aiTermStart:
-					// Check if click is on AI agent pills
 					if msg.Y >= 2 && msg.Y <= 3 {
 						pillX := aiTermStart + 2
 						pills := []string{"Claude", "Codex", "Gemini", "Aider", "Custom"}
+						keys := []string{"1", "2", "3", "4", "5"}
 						for i, p := range pills {
-							pillW := lipgloss.Width(p) + 6
+							pillW := lipgloss.Width(fmt.Sprintf(" %s [Alt+%s] ", p, keys[i])) + 4
 							if msg.X >= pillX && msg.X < pillX+pillW {
-								switch i {
-								case 0:
-									m.aiAgentName = "Claude"
-									m.aiTerminalInput = "claude"
+								m.aiAgentName = p
+								if i < 4 {
+									m.aiTerminalInput = strings.ToLower(p)
 									return m, m.submitAITerminal()
-								case 1:
-									m.aiAgentName = "Codex"
-									m.aiTerminalInput = "codex"
-									return m, m.submitAITerminal()
-								case 2:
-									m.aiAgentName = "Gemini"
-									m.aiTerminalInput = "gemini"
-									return m, m.submitAITerminal()
-								case 3:
-									m.aiAgentName = "Aider"
-									m.aiTerminalInput = "aider"
-									return m, m.submitAITerminal()
-								case 4:
-									m.aiAgentName = "Custom"
+								} else {
 									m.aiTerminalInput = ""
 									m.statusMsg = "Custom AI agent selected. Type your command."
 									m.isError = false
@@ -1082,8 +1025,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			} else if m.layoutMode == 3 { // Terminal Focus
 				editorW = (m.width * 40) / 100
-				divX := editorW
 				aiTermStart := editorW + gap
+				divX := editorW
 
 				switch {
 				case msg.X == divX || msg.X == divX-1:
@@ -1097,28 +1040,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if msg.Y >= 2 && msg.Y <= 3 {
 						pillX := aiTermStart + 2
 						pills := []string{"Claude", "Codex", "Gemini", "Aider", "Custom"}
+						keys := []string{"1", "2", "3", "4", "5"}
 						for i, p := range pills {
-							pillW := lipgloss.Width(p) + 6
+							pillW := lipgloss.Width(fmt.Sprintf(" %s [Alt+%s] ", p, keys[i])) + 4
 							if msg.X >= pillX && msg.X < pillX+pillW {
-								switch i {
-								case 0:
-									m.aiAgentName = "Claude"
-									m.aiTerminalInput = "claude"
+								m.aiAgentName = p
+								if i < 4 {
+									m.aiTerminalInput = strings.ToLower(p)
 									return m, m.submitAITerminal()
-								case 1:
-									m.aiAgentName = "Codex"
-									m.aiTerminalInput = "codex"
-									return m, m.submitAITerminal()
-								case 2:
-									m.aiAgentName = "Gemini"
-									m.aiTerminalInput = "gemini"
-									return m, m.submitAITerminal()
-								case 3:
-									m.aiAgentName = "Aider"
-									m.aiTerminalInput = "aider"
-									return m, m.submitAITerminal()
-								case 4:
-									m.aiAgentName = "Custom"
+								} else {
 									m.aiTerminalInput = ""
 									m.statusMsg = "Custom AI agent selected. Type your command."
 									m.isError = false
@@ -1298,9 +1228,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "ctrl+k":
 				buf.Reset()
-			case "ctrl+l":
-				cycleLayout(&m)
-				return m, nil
 			default:
 				if len(msg.String()) == 1 {
 					if isAITerminal {
