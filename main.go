@@ -6,10 +6,611 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// ==============================================================================
+// Types & Messages
+// ==============================================================================
+
+type tickMsg struct{}
+
+func tickCmd() tea.Cmd {
+	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
+		return tickMsg{}
+	})
+}
+
+type FileEntry struct {
+	Name  string `json:"name"`
+	IsDir bool   `json:"is_dir"`
+	Path  string `json:"path"`
+}
+
+type listDirMsg struct {
+	Entries []FileEntry
+	Error   string
+}
+
+type readFileMsg struct {
+	Content string
+	Path    string
+	Error   string
+}
+
+type writeFileMsg struct {
+	Error string
+}
+
+type runCommandMsg struct {
+	Output string
+	Error  string
+}
+
+// ==============================================================================
+// Model
+// ==============================================================================
+
+type model struct {
+	width           int
+	height          int
+	active          string // "files", "editor", "terminal"
+	currentFolder   string
+	currentPath     string
+	currentTheme    Theme
+	
+	// Editor
+	textarea        textarea.Model
+	
+	// Files
+	files           []FileEntry
+	fileCursor      int
+	
+	// Terminal
+	terminalBuf     *strings.Builder
+	terminalInput   string
+	terminalHistory []string
+	terminalHistIdx int
+	cursorVisible   bool
+	
+	// Status
+	statusMsg       string
+	isError         bool
+	
+	bridge          *Bridge
+}
+
+func initialModel() model {
+	cwd, _ := os.Getwd()
+	cfg := loadConfig()
+	
+	theme := AyuDark
+	for _, t := range Themes {
+		if t.Name == cfg.Theme {
+			theme = t
+			break
+		}
+	}
+
+	b, _ := NewBridge("python") // Assume python is in PATH
+
+	ta := textarea.New()
+	ta.Placeholder = "Open a file to start editing..."
+	ta.FocusedStyle.CursorLine = lipgloss.NewStyle().Background(lipgloss.Color(theme.CursorLine))
+	ta.ShowLineNumbers = true
+
+	return model{
+		active:          "files",
+		currentFolder:   filepath.Base(cwd),
+		currentTheme:    theme,
+		textarea:        ta,
+		terminalBuf:     &strings.Builder{},
+		terminalHistIdx: -1,
+		bridge:          b,
+	}
+}
+
+// ==============================================================================
+// Commands
+// ==============================================================================
+
+func listDir(b *Bridge, path string) tea.Cmd {
+	return func() tea.Msg {
+		res, err := b.Call("list_dir", map[string]interface{}{"path": path})
+		if err != nil {
+			return listDirMsg{Error: err.Error()}
+		}
+		var data struct {
+			Status  string      `json:"status"`
+			Entries []FileEntry `json:"entries"`
+			Message string      `json:"message"`
+		}
+		json.Unmarshal(res, &data)
+		if data.Status == "error" {
+			return listDirMsg{Error: data.Message}
+		}
+		return listDirMsg{Entries: data.Entries}
+	}
+}
+
+func readFile(b *Bridge, path string) tea.Cmd {
+	return func() tea.Msg {
+		res, err := b.Call("read_file", map[string]interface{}{"path": path})
+		if err != nil {
+			return readFileMsg{Error: err.Error()}
+		}
+		var data struct {
+			Status  string `json:"status"`
+			Content string `json:"content"`
+			Message string `json:"message"`
+		}
+		json.Unmarshal(res, &data)
+		if data.Status == "error" {
+			return readFileMsg{Error: data.Message}
+		}
+		return readFileMsg{Content: data.Content, Path: path}
+	}
+}
+
+func writeFile(b *Bridge, path, content string) tea.Cmd {
+	return func() tea.Msg {
+		res, err := b.Call("write_file", map[string]interface{}{"path": path, "content": content})
+		if err != nil {
+			return writeFileMsg{Error: err.Error()}
+		}
+		var data struct {
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		}
+		json.Unmarshal(res, &data)
+		if data.Status == "error" {
+			return writeFileMsg{Error: data.Message}
+		}
+		return writeFileMsg{}
+	}
+}
+
+func runCommand(b *Bridge, command string) tea.Cmd {
+	return func() tea.Msg {
+		res, err := b.Call("run_command", map[string]interface{}{"command": command})
+		if err != nil {
+			return runCommandMsg{Error: err.Error()}
+		}
+		var data struct {
+			Status  string `json:"status"`
+			Output  string `json:"output"`
+			Message string `json:"message"`
+		}
+		json.Unmarshal(res, &data)
+		if data.Status == "error" {
+			return runCommandMsg{Error: data.Message}
+		}
+		return runCommandMsg{Output: data.Output}
+	}
+}
+
+func waitForEvent(b *Bridge) tea.Cmd {
+	return func() tea.Msg {
+		return <-b.Events()
+	}
+}
+
+func (m model) Init() tea.Cmd {
+	return tea.Batch(
+		tickCmd(),
+		waitForEvent(m.bridge),
+		listDir(m.bridge, "."),
+	)
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+
+	switch msg := msg.(type) {
+	case tickMsg:
+		m.cursorVisible = !m.cursorVisible
+		return m, tickCmd()
+
+	case listDirMsg:
+		if msg.Error != "" {
+			m.statusMsg = "ListDir error: " + msg.Error
+			m.isError = true
+		} else {
+			m.files = msg.Entries
+			m.fileCursor = 0
+		}
+
+	case readFileMsg:
+		if msg.Error != "" {
+			m.statusMsg = "Read error: " + msg.Error
+			m.isError = true
+		} else {
+			m.currentPath = msg.Path
+			m.textarea.SetValue(msg.Content)
+			m.active = "editor"
+			m.textarea.Focus()
+			m.statusMsg = "Opened " + filepath.Base(msg.Path)
+			m.isError = false
+		}
+
+	case writeFileMsg:
+		if msg.Error != "" {
+			m.statusMsg = "Save error: " + msg.Error
+			m.isError = true
+		} else {
+			m.statusMsg = "Saved " + filepath.Base(m.currentPath)
+			m.isError = false
+		}
+
+	case runCommandMsg:
+		if msg.Error != "" {
+			m.terminalBuf.WriteString("\nError: " + msg.Error + "\n")
+		} else {
+			m.terminalBuf.WriteString("\n" + msg.Output)
+		}
+
+	case RPCEvent:
+		if msg.Event == "terminal_data" {
+			var data struct {
+				Data string `json:"data"`
+			}
+			json.Unmarshal(msg.Data, &data)
+			m.terminalBuf.WriteString(data.Data)
+		}
+		return m, waitForEvent(m.bridge)
+
+	case tea.KeyMsg:
+		// Global bindings
+		switch msg.String() {
+		case "ctrl+c":
+			if m.active != "terminal" {
+				return m, tea.Quit
+			}
+		case "ctrl+q":
+			return m, tea.Quit
+		case "ctrl+1":
+			m.active = "files"
+			m.textarea.Blur()
+		case "ctrl+2":
+			m.active = "editor"
+			m.textarea.Focus()
+		case "ctrl+3":
+			m.active = "terminal"
+			m.textarea.Blur()
+		case "ctrl+s":
+			if m.currentPath != "" {
+				return m, writeFile(m.bridge, m.currentPath, m.textarea.Value())
+			}
+		case "ctrl+t":
+			// Cycle themes
+			idx := 0
+			for i, t := range Themes {
+				if t.Name == m.currentTheme.Name {
+					idx = (i + 1) % len(Themes)
+					break
+				}
+			}
+			m.currentTheme = Themes[idx]
+			m.textarea.FocusedStyle.CursorLine = lipgloss.NewStyle().Background(lipgloss.Color(m.currentTheme.CursorLine))
+			saveConfig(m.currentTheme.Name)
+		}
+
+		// Panel specific bindings
+		switch m.active {
+		case "files":
+			switch msg.String() {
+			case "up", "k":
+				if m.fileCursor > 0 {
+					m.fileCursor--
+				}
+			case "down", "j":
+				if m.fileCursor < len(m.files)-1 {
+					m.fileCursor++
+				}
+			case "enter":
+				if len(m.files) > 0 {
+					entry := m.files[m.fileCursor]
+					if entry.IsDir {
+						return m, listDir(m.bridge, entry.Path)
+					} else {
+						return m, readFile(m.bridge, entry.Path)
+					}
+				}
+			case "backspace":
+				return m, listDir(m.bridge, "..")
+			}
+
+		case "editor":
+			var cmd tea.Cmd
+			m.textarea, cmd = m.textarea.Update(msg)
+			return m, cmd
+
+		case "terminal":
+			switch msg.String() {
+			case "enter":
+				if m.terminalInput != "" {
+					m.terminalHistory = append(m.terminalHistory, m.terminalInput)
+					m.terminalBuf.WriteString("\n> " + m.terminalInput + "\n")
+					cmd := runCommand(m.bridge, m.terminalInput)
+					m.terminalInput = ""
+					m.terminalHistIdx = -1
+					return m, cmd
+				}
+			case "up":
+				if len(m.terminalHistory) > 0 {
+					if m.terminalHistIdx == -1 {
+						m.terminalHistIdx = len(m.terminalHistory) - 1
+					} else if m.terminalHistIdx > 0 {
+						m.terminalHistIdx--
+					}
+					m.terminalInput = m.terminalHistory[m.terminalHistIdx]
+				}
+			case "down":
+				if m.terminalHistIdx != -1 {
+					if m.terminalHistIdx < len(m.terminalHistory)-1 {
+						m.terminalHistIdx++
+						m.terminalInput = m.terminalHistory[m.terminalHistIdx]
+					} else {
+						m.terminalHistIdx = -1
+						m.terminalInput = ""
+					}
+				}
+			case "backspace":
+				if len(m.terminalInput) > 0 {
+					m.terminalInput = m.terminalInput[:len(m.terminalInput)-1]
+				}
+			case "ctrl+l":
+				m.terminalBuf.Reset()
+			default:
+				if len(msg.String()) == 1 {
+					m.terminalInput += msg.String()
+				}
+			}
+		}
+
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		
+		// Update panel widths for textarea resize
+		filesW := (m.width * 20) / 100
+		editorW := (m.width * 45) / 100
+		gap := 1
+		innerEditorW := editorW - 2
+		mainH := m.height - 4 // header(2) + footer(2)
+		m.textarea.SetWidth(innerEditorW)
+		m.textarea.SetHeight(mainH - 2)
+	}
+	return m, tea.Batch(cmds...)
+}
+
+// ==============================================================================
+// View Helpers
+// ==============================================================================
+
+func renderPanel(title string, width, height int, active bool, theme Theme, content string) string {
+	bg := theme.SurfaceAlt
+	if title == "Editor" {
+		bg = theme.Surface
+	}
+
+	borderColor := theme.Border
+	titleColor := theme.TextMuted
+	if active {
+		borderColor = theme.BorderFocused
+		titleColor = theme.Accent
+	}
+
+	innerWidth := width - 2
+	innerHeight := height - 2
+
+	var styledContent string
+	if content == "" {
+		styledContent = lipgloss.Place(innerWidth, innerHeight, lipgloss.Center, lipgloss.Center, "...", lipgloss.WithWhitespaceBackground(lipgloss.Color(bg)))
+	} else {
+		// Truncate/pad lines to fit innerWidth/innerHeight
+		lines := strings.Split(content, "\n")
+		var processed []string
+		for i := 0; i < innerHeight; i++ {
+			if i < len(lines) {
+				line := lines[i]
+				if lipgloss.Width(line) > innerWidth {
+					line = line[:innerWidth] // Simple truncation
+				}
+				processed = append(processed, line+strings.Repeat(" ", innerWidth-lipgloss.Width(line)))
+			} else {
+				processed = append(processed, strings.Repeat(" ", innerWidth))
+			}
+		}
+		styledContent = strings.Join(processed, "\n")
+	}
+
+	// Border logic
+	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(borderColor)).Background(lipgloss.Color(bg))
+	displayTitle := fmt.Sprintf("  %s ", title)
+	styledTitle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(titleColor)).
+		Background(lipgloss.Color(bg)).
+		Bold(active).
+		Render(displayTitle)
+	
+	leftCorner := borderStyle.Render("╭─")
+	rightCorner := borderStyle.Render("╮")
+	dashCount := width - 2 - lipgloss.Width(styledTitle) - 1
+	if dashCount < 0 { dashCount = 0 }
+	topLine := leftCorner + styledTitle + borderStyle.Render(strings.Repeat("─", dashCount)) + rightCorner
+
+	sideBorder := borderStyle.Render("│")
+	contentLines := strings.Split(styledContent, "\n")
+	var middleArea strings.Builder
+	for i, line := range contentLines {
+		if i >= innerHeight { break }
+		middleArea.WriteString(sideBorder + line + sideBorder)
+		if i < len(contentLines)-1 {
+			middleArea.WriteString("\n")
+		}
+	}
+
+	bottomLine := borderStyle.Render("╰" + strings.Repeat("─", width-2) + "╯")
+
+	return topLine + "\n" + middleArea.String() + "\n" + bottomLine
+}
+
+func renderFiles(width, height int, active bool, theme Theme, files []FileEntry, cursor int) string {
+	bg := theme.SurfaceAlt
+	innerWidth := width - 2
+	innerHeight := height - 2
+
+	var lines []string
+	for i, f := range files {
+		if len(lines) >= innerHeight { break }
+		
+		prefix := "  "
+		if f.IsDir {
+			prefix = "📁 "
+		}
+		
+		name := f.Name
+		if lipgloss.Width(name) > innerWidth-4 {
+			name = name[:innerWidth-7] + "..."
+		}
+		
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Text))
+		if i == cursor && active {
+			style = style.Background(lipgloss.Color(theme.Accent)).Foreground(lipgloss.Color(theme.Background))
+		} else if f.IsDir {
+			style = style.Foreground(lipgloss.Color(theme.AccentAlt))
+		}
+		
+		line := prefix + name
+		lines = append(lines, style.Render(line+strings.Repeat(" ", innerWidth-lipgloss.Width(line))))
+	}
+	
+	for len(lines) < innerHeight {
+		lines = append(lines, strings.Repeat(" ", innerWidth))
+	}
+	
+	return renderPanel("Files", width, height, active, theme, strings.Join(lines, "\n"))
+}
+
+func renderTerminal(width, height int, active bool, theme Theme, content string, input string, cursorVisible bool) string {
+	bg := theme.SurfaceAlt
+	innerWidth := width - 2
+	innerHeight := height - 2
+
+	outputHeight := innerHeight - 1
+	rawLines := strings.Split(content, "\n")
+	
+	var lines []string
+	if len(rawLines) > outputHeight {
+		rawLines = rawLines[len(rawLines)-outputHeight:]
+	}
+	
+	for _, line := range rawLines {
+		if lipgloss.Width(line) > innerWidth {
+			line = line[:innerWidth]
+		}
+		lines = append(lines, line+strings.Repeat(" ", innerWidth-lipgloss.Width(line)))
+	}
+	for len(lines) < outputHeight {
+		lines = append(lines, strings.Repeat(" ", innerWidth))
+	}
+
+	// Input line
+	prompt := "> "
+	cursor := ""
+	if cursorVisible && active {
+		cursor = "█"
+	}
+	
+	inputLine := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Accent)).Render(prompt) + input + cursor
+	if lipgloss.Width(inputLine) > innerWidth {
+		inputLine = inputLine[lipgloss.Width(inputLine)-innerWidth:]
+	}
+	inputLine += strings.Repeat(" ", innerWidth-lipgloss.Width(inputLine))
+	
+	full := strings.Join(lines, "\n") + "\n" + inputLine
+	return renderPanel("Terminal", width, height, active, theme, full)
+}
+
+func (m model) View() string {
+	if m.width == 0 || m.height == 0 {
+		return "Initializing..."
+	}
+
+	t := m.currentTheme
+
+	// Dimensions
+	headerH := 1 
+	headerSepH := 1
+	footerH := 1 
+	footerSepH := 1
+	mainH := m.height - headerH - headerSepH - footerH - footerSepH
+	if mainH < 0 { mainH = 0 }
+	gap := 1
+
+	// Widths
+	editorW := (m.width * 45) / 100
+
+	// --- 1. HEADER ---
+	logoStyle := func(color string) lipgloss.Style {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true).Background(lipgloss.Color(t.SurfaceAlt))
+	}
+	logo := lipgloss.JoinHorizontal(lipgloss.Left, 
+		logoStyle(t.Accent).Render(" T "), 
+		logoStyle(t.AccentAlt).Render(" R "), 
+		logoStyle(t.AccentAlt).Render(" I "), 
+		logoStyle(t.Accent).Render(" X "))
+	
+	sep := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Background(lipgloss.Color(t.SurfaceAlt)).Render(" │ ")
+	folder := lipgloss.NewStyle().Foreground(lipgloss.Color(t.AccentAlt)).Background(lipgloss.Color(t.SurfaceAlt)).
+		Width(m.width - lipgloss.Width(logo) - 20).Align(lipgloss.Center).Render(strings.ToUpper(m.currentFolder))
+	
+	headerContent := lipgloss.NewStyle().Width(m.width).Background(lipgloss.Color(t.SurfaceAlt)).
+		Render(lipgloss.JoinHorizontal(lipgloss.Left, logo, sep, folder))
+	
+	headerSep := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Width(m.width).Render(strings.Repeat("─", m.width))
+	header := lipgloss.JoinVertical(lipgloss.Left, headerContent, headerSep)
+
+	// --- 2. MAIN AREA ---
+	filesPanel := renderFiles(filesW, mainH, m.active == "files", t, m.files, m.fileCursor)
+	
+	// Editor Panel with Textarea
+	editorView := m.textarea.View()
+	editorPanel := renderPanel("Editor", editorW, mainH, m.active == "editor", t, editorView)
+	
+	terminalPanel := renderTerminal(terminalW, mainH, m.active == "terminal", t, m.terminalBuf.String(), m.terminalInput, m.cursorVisible)
+
+	spacer := lipgloss.NewStyle().Width(gap).Render("")
+	mainArea := lipgloss.JoinHorizontal(lipgloss.Top, filesPanel, spacer, editorPanel, spacer, terminalPanel)
+
+	// --- 3. STATUS BAR ---
+	statusColor := t.Accent
+	if m.isError {
+		statusColor = t.Error
+	}
+	
+	statusBrand := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)).Bold(true).Background(lipgloss.Color(t.SurfaceAlt)).Padding(0, 1).Render("TRIX")
+	statusText := lipgloss.NewStyle().Foreground(lipgloss.Color(statusColor)).Background(lipgloss.Color(t.SurfaceAlt)).Render(" " + m.statusMsg)
+	
+	remainingW := m.width - lipgloss.Width(statusBrand) - lipgloss.Width(statusText) - 30
+	if remainingW < 0 { remainingW = 0 }
+	statusSpacer := lipgloss.NewStyle().Width(remainingW).Background(lipgloss.Color(t.SurfaceAlt)).Render("")
+	
+	pills := lipgloss.NewStyle().Background(lipgloss.Color(t.Surface)).Foreground(lipgloss.Color(t.Accent)).Padding(0, 1).Render("⌃1 Files  ⌃2 Editor  ⌃3 Term  ⌃S Save  ⌃Q Quit")
+	
+	footerContent := lipgloss.NewStyle().Width(m.width).Background(lipgloss.Color(t.SurfaceAlt)).
+		Render(lipgloss.JoinHorizontal(lipgloss.Left, statusBrand, statusText, statusSpacer, pills))
+	
+	footerSep := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Width(m.width).Render(strings.Repeat("─", m.width))
+	footer := lipgloss.JoinVertical(lipgloss.Left, footerSep, footerContent)
+
+	return lipgloss.JoinVertical(lipgloss.Left, header, mainArea, footer)
+}
 
 // ==============================================================================
 // Config Persistence
@@ -42,274 +643,6 @@ func saveConfig(themeName string) {
 	cfg := Config{Theme: themeName}
 	data, _ := json.MarshalIndent(cfg, "", "  ")
 	os.WriteFile(file, data, 0644)
-}
-
-// ==============================================================================
-// Model
-// ==============================================================================
-
-type model struct {
-	width         int
-	height        int
-	active        string // "files", "editor", "terminal"
-	currentFolder string
-	currentTheme  Theme
-}
-
-func initialModel() model {
-	cwd, _ := os.Getwd()
-	cfg := loadConfig()
-	
-	theme := AyuDark
-	for _, t := range Themes {
-		if t.Name == cfg.Theme {
-			theme = t
-			break
-		}
-	}
-
-	return model{
-		active:        "editor",
-		currentFolder: filepath.Base(cwd),
-		currentTheme:  theme,
-	}
-}
-
-func (m model) Init() tea.Cmd {
-	return nil
-}
-
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
-			return m, tea.Quit
-		case "ctrl+1":
-			m.active = "files"
-		case "ctrl+2":
-			m.active = "editor"
-		case "ctrl+3":
-			m.active = "terminal"
-		case "ctrl+t":
-			// Cycle themes
-			idx := 0
-			for i, t := range Themes {
-				if t.Name == m.currentTheme.Name {
-					idx = (i + 1) % len(Themes)
-					break
-				}
-			}
-			m.currentTheme = Themes[idx]
-			saveConfig(m.currentTheme.Name)
-		}
-
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-	}
-	return m, nil
-}
-
-// ==============================================================================
-// View Helpers
-// ==============================================================================
-
-func renderPanel(title string, width, height int, active bool, theme Theme, isEditor bool) string {
-	bg := theme.SurfaceAlt
-	if isEditor {
-		bg = theme.Surface
-	}
-
-	borderColor := theme.Border
-	titleColor := theme.TextMuted
-	if active {
-		borderColor = theme.BorderFocused
-		titleColor = theme.Accent
-	}
-
-	// Inner width and height (subtract borders)
-	innerWidth := width - 2
-	innerHeight := height - 2
-
-	// Placeholder content styles
-	titleText := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Accent)).Bold(true)
-	subtitleText := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.TextMuted))
-
-	var content string
-	switch title {
-	case "Files":
-		c1 := subtitleText.Render("No folder open")
-		c2 := subtitleText.Render("Press Ctrl+O to open")
-		content = lipgloss.JoinVertical(lipgloss.Center, c1, c2)
-	case "Editor":
-		c1 := titleText.Render("Welcome to TRIX")
-		c2 := subtitleText.Render("Open a file to start editing")
-		content = lipgloss.JoinVertical(lipgloss.Center, c1, c2)
-	case "Terminal":
-		c1 := subtitleText.Render("Terminal ready")
-		c2 := subtitleText.Render("Press Ctrl+3 to focus")
-		content = lipgloss.JoinVertical(lipgloss.Center, c1, c2)
-	}
-
-	// Center content using lipgloss.Place with WithWhitespaceBackground
-	// This ensures no black bars behind the text as it fills with the panel background
-	centeredContent := lipgloss.Place(
-		innerWidth, innerHeight,
-		lipgloss.Center, lipgloss.Center,
-		content,
-		lipgloss.WithWhitespaceBackground(lipgloss.Color(bg)),
-	)
-
-	// Construct the border manually to embed the title correctly
-	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(borderColor)).Background(lipgloss.Color(bg))
-	
-	// Top border: ╭─  Files ─────────╮
-	displayTitle := fmt.Sprintf("  %s ", title)
-	styledTitle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color(titleColor)).
-		Background(lipgloss.Color(bg)).
-		Bold(active).
-		Render(displayTitle)
-	
-	leftCorner := borderStyle.Render("╭─")
-	rightCorner := borderStyle.Render("╮")
-	
-	visibleTitleLen := lipgloss.Width(styledTitle)
-	dashCount := width - 2 - visibleTitleLen - 1
-	if dashCount < 0 { dashCount = 0 }
-	dashes := borderStyle.Render(strings.Repeat("─", dashCount))
-	
-	topLine := leftCorner + styledTitle + dashes + rightCorner
-
-	// Middle lines: │ content │
-	sideBorder := borderStyle.Render("│")
-	lines := strings.Split(centeredContent, "\n")
-	var middleArea strings.Builder
-	for _, line := range lines {
-		middleArea.WriteString(sideBorder + line + sideBorder + "\n")
-	}
-
-	// Bottom line: ╰───────────╯
-	bottomLine := borderStyle.Render("╰" + strings.Repeat("─", width-2) + "╯")
-
-	return topLine + "\n" + middleArea.String() + bottomLine
-}
-
-func (m model) View() string {
-	if m.width == 0 || m.height == 0 {
-		return "Initializing..."
-	}
-
-	t := m.currentTheme
-
-	// Dimensions
-	headerH := 1 
-	headerSepH := 1
-	footerH := 1 
-	footerSepH := 1
-	mainH := m.height - headerH - headerSepH - footerH - footerSepH
-	gap := 1
-
-	// Widths: 20%, 45%, 35%
-	filesW := (m.width * 20) / 100
-	editorW := (m.width * 45) / 100
-	terminalW := m.width - filesW - editorW - (gap * 2)
-
-	// Header Styles
-	logoStyle := func(color string) lipgloss.Style {
-		return lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true).Background(lipgloss.Color(t.SurfaceAlt))
-	}
-	
-	sepStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Background(lipgloss.Color(t.SurfaceAlt))
-	folderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.AccentAlt)).Background(lipgloss.Color(t.SurfaceAlt))
-	themeNameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.TextMuted)).Background(lipgloss.Color(t.SurfaceAlt)).PaddingRight(1)
-	versionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.TextMuted)).Background(lipgloss.Color(t.SurfaceAlt)).PaddingRight(1)
-
-	// --- 1. HEADER ---
-	logoT := logoStyle(t.Accent).Render(" T ")
-	logoR := logoStyle(t.AccentAlt).Render(" R ")
-	logoI := logoStyle(t.AccentAlt).Render(" I ")
-	logoX := logoStyle(t.Accent).Render(" X ")
-	logo := lipgloss.JoinHorizontal(lipgloss.Left, logoT, logoR, logoI, logoX)
-	
-	sep := sepStyle.Render(" │ ")
-	themeName := themeNameStyle.Render(t.Name)
-	version := versionStyle.Render("v0.1.0")
-	rightInfo := lipgloss.JoinHorizontal(lipgloss.Left, themeName, version)
-	
-	// Middle folder name
-	remainingHeaderW := m.width - lipgloss.Width(logo) - lipgloss.Width(sep) - lipgloss.Width(rightInfo)
-	if remainingHeaderW < 0 { remainingHeaderW = 0 }
-	folder := folderStyle.Width(remainingHeaderW).Align(lipgloss.Center).Render(strings.ToUpper(m.currentFolder))
-	
-	headerContent := lipgloss.NewStyle().
-		Width(m.width).
-		Height(1).
-		Background(lipgloss.Color(t.SurfaceAlt)).
-		Render(lipgloss.JoinHorizontal(lipgloss.Left, logo, sep, folder, rightInfo))
-	
-	headerSep := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Background(lipgloss.Color(t.Background)).Width(m.width).Render(strings.Repeat("─", m.width))
-	header := lipgloss.JoinVertical(lipgloss.Left, headerContent, headerSep)
-
-	// --- 2. MAIN AREA ---
-	filesPanel := renderPanel("Files", filesW, mainH, m.active == "files", t, false)
-	editorPanel := renderPanel("Editor", editorW, mainH, m.active == "editor", t, true)
-	terminalPanel := renderPanel("Terminal", terminalW, mainH, m.active == "terminal", t, false)
-
-	spacer := lipgloss.NewStyle().Width(gap).Background(lipgloss.Color(t.Background)).Render("")
-
-	mainArea := lipgloss.JoinHorizontal(lipgloss.Top,
-		filesPanel,
-		spacer,
-		editorPanel,
-		spacer,
-		terminalPanel,
-	)
-
-	// --- 3. STATUS BAR ---
-	statusBrandStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)).Bold(true).Background(lipgloss.Color(t.SurfaceAlt))
-	statusActiveStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.AccentAlt)).Background(lipgloss.Color(t.SurfaceAlt))
-
-	statusBrand := statusBrandStyle.PaddingLeft(1).Render("TRIX")
-	statusSep := sepStyle.Render(" │ ")
-	statusActive := statusActiveStyle.Render(strings.ToUpper(m.active))
-	
-	// Right side pills
-	pillStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color(t.Surface)).
-		Foreground(lipgloss.Color(t.Accent)).
-		Padding(0, 1).
-		MarginLeft(1)
-
-	p1 := pillStyle.Render("⌃1 Files")
-	p2 := pillStyle.Render("⌃2 Editor")
-	p3 := pillStyle.Render("⌃3 Terminal")
-	pq := pillStyle.Render("q Quit")
-	pills := lipgloss.JoinHorizontal(lipgloss.Left, p1, p2, p3, pq)
-
-	remainingStatusW := m.width - lipgloss.Width(statusBrand) - lipgloss.Width(statusSep) - lipgloss.Width(statusActive) - lipgloss.Width(pills) - 1
-	if remainingStatusW < 0 { remainingStatusW = 0 }
-	statusSpacer := lipgloss.NewStyle().Width(remainingStatusW).Background(lipgloss.Color(t.SurfaceAlt)).Render("")
-	
-	footerContent := lipgloss.NewStyle().
-		Width(m.width).
-		Height(1).
-		Background(lipgloss.Color(t.SurfaceAlt)).
-		Render(lipgloss.JoinHorizontal(lipgloss.Left, statusBrand, statusSep, statusActive, statusSpacer, pills))
-	
-	footerSep := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Background(lipgloss.Color(t.Background)).Width(m.width).Render(strings.Repeat("─", m.width))
-	footer := lipgloss.JoinVertical(lipgloss.Left, footerSep, footerContent)
-
-	// --- FINAL ASSEMBLY ---
-	finalView := lipgloss.JoinVertical(lipgloss.Left, header, mainArea, footer)
-	
-	// Force background and full size
-	return lipgloss.NewStyle().
-		Width(m.width).
-		Height(m.height).
-		Background(lipgloss.Color(t.Background)).
-		Render(finalView)
 }
 
 func main() {
