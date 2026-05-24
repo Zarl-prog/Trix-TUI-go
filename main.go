@@ -170,7 +170,6 @@ type model struct {
 }
 
 func initialModel() model {
-	cwd, _ := os.Getwd()
 	cfg := loadConfig()
 	
 	theme := AyuDark
@@ -1208,14 +1207,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "editor":
 			// Save content for undo only on content-modifying keys
 			switch msg.String() {
-			case "ctrl+z", "ctrl+y":
-				// Already handled globally, don't double-process
-				var cmd tea.Cmd
-				m.textarea, cmd = m.textarea.Update(msg)
-				// Update cursor position
-				m.updateCursorPos()
-				return m, cmd
-			}
+				}
 			prev := m.textarea.Value()
 			var cmd tea.Cmd
 			m.textarea, cmd = m.textarea.Update(msg)
@@ -2455,9 +2447,19 @@ func saveConfig(themeName string, layoutMode int) {
 }
 
 func main() {
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
-	if _, err := p.Run(); err != nil {
+	m := initialModel()
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	finalModel, err := p.Run()
+	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
+	}
+	// Cleanup: close the Python bridge process
+	if finalModel != nil {
+		if m2, ok := finalModel.(model); ok {
+			if m2.bridge != nil {
+				m2.bridge.Close()
+			}
+		}
 	}
 }
