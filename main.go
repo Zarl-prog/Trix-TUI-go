@@ -50,7 +50,6 @@ type writeFileMsg struct {
 type runCommandMsg struct {
 	Output    string
 	Error     string
-	IsAICmd   bool // true if this was triggered from AI terminal
 }
 
 type gitBranchMsg struct {
@@ -149,10 +148,6 @@ type model struct {
 	layoutMode        int
 	
 	// AI Terminal (right panel in AI Developer & Terminal Focus modes)
-	aiTerminalBuf     *strings.Builder
-	aiTerminalInput   string
-	aiTerminalHistory []string
-	aiTerminalHistIdx int
 	aiAgentName       string // "Claude", "Codex", "Gemini", "Aider", "Custom", or ""
 	aiAgentAnimTick   bool   // toggles for animated ● indicator
 	
@@ -217,8 +212,6 @@ func initialModel() model {
 		maxUndo:           100,
 		terminalBuf:       &strings.Builder{},
 		terminalHistIdx:   -1,
-		aiTerminalBuf:     &strings.Builder{},
-		aiTerminalHistIdx: -1,
 		layoutMode:        layoutMode,
 		currentLang:       "Plain Text",
 		expanded:          map[string]bool{".": true},
@@ -289,11 +282,11 @@ func writeFile(b *Bridge, path, content string) tea.Cmd {
 	}
 }
 
-func runCommand(b *Bridge, command string, isAICmd bool) tea.Cmd {
+func runCommand(b *Bridge, command string) tea.Cmd {
 	return func() tea.Msg {
 		res, err := b.Call("run_command", map[string]interface{}{"command": command})
 		if err != nil {
-			return runCommandMsg{Error: err.Error(), IsAICmd: isAICmd}
+			return runCommandMsg{Error: err.Error()}
 		}
 		var data struct {
 			Status  string `json:"status"`
@@ -302,9 +295,9 @@ func runCommand(b *Bridge, command string, isAICmd bool) tea.Cmd {
 		}
 		json.Unmarshal(res, &data)
 		if data.Status == "error" {
-			return runCommandMsg{Error: data.Message, IsAICmd: isAICmd}
+			return runCommandMsg{Error: data.Message}
 		}
-		return runCommandMsg{Output: data.Output, IsAICmd: isAICmd}
+		return runCommandMsg{Output: data.Output}
 	}
 }
 
@@ -456,28 +449,18 @@ func flattenTree(root FileNode, expanded map[string]bool) []FileNode {
 // ==============================================================================
 
 func (m *model) submitAITerminal() tea.Cmd {
-	input := m.aiTerminalInput
-	if m.layoutMode == 0 {
-		input = m.terminalInput
-	}
+	input := m.terminalInput
 
 	if input == "" {
 		return nil
 	}
 
-	if m.layoutMode == 1 || m.layoutMode == 3 {
-		m.aiTerminalHistory = append(m.aiTerminalHistory, input)
-		m.aiTerminalBuf.WriteString("\nAI ❯ " + input + "\n")
-		m.aiTerminalInput = ""
-		m.aiTerminalHistIdx = -1
-	} else {
-		m.terminalHistory = append(m.terminalHistory, input)
-		m.terminalBuf.WriteString("\nAI ❯ " + input + "\n")
-		m.terminalInput = ""
-		m.terminalHistIdx = -1
-	}
+	m.terminalHistory = append(m.terminalHistory, input)
+	m.terminalBuf.WriteString("\nAI ❯ " + input + "\n")
+	m.terminalInput = ""
+	m.terminalHistIdx = -1
 
-	cmd := runCommand(m.bridge, input, true)
+	cmd := runCommand(m.bridge, input)
 	m.active = "terminal"
 	m.textarea.Blur()
 	return cmd
@@ -490,13 +473,8 @@ func (m *model) injectContextFilePath() tea.Cmd {
 		return nil
 	}
 	contextText := "Here is my current file: " + m.currentPath
-	if m.layoutMode == 0 {
-		m.terminalInput = contextText
-		m.statusMsg = "Injected file path into Terminal"
-	} else {
-		m.aiTerminalInput = contextText
-		m.statusMsg = "Injected file path into AI Terminal"
-	}
+	m.terminalInput = contextText
+	m.statusMsg = "Injected file path into Terminal"
 	m.isError = false
 	m.active = "terminal"
 	m.textarea.Blur()
@@ -544,13 +522,8 @@ func (m *model) injectContextSelection() tea.Cmd {
 		contextText += "\n" + snippet
 	}
 
-	if m.layoutMode == 0 {
-		m.terminalInput = contextText
-		m.statusMsg = "Injected context into Terminal"
-	} else {
-		m.aiTerminalInput = contextText
-		m.statusMsg = "Injected context into AI Terminal"
-	}
+	m.terminalInput = contextText
+	m.statusMsg = "Injected context into Terminal"
 	m.isError = false
 	m.active = "terminal"
 	m.textarea.Blur()
@@ -567,13 +540,8 @@ func (m *model) injectContextFullFile() tea.Cmd {
 	content := m.textarea.Value()
 	contextText := "Here is my current file (" + fname + "):\n" + content + "\n\nPlease help me with:"
 
-	if m.layoutMode == 0 {
-		m.terminalInput = contextText
-		m.statusMsg = "Injected full file into Terminal"
-	} else {
-		m.aiTerminalInput = contextText
-		m.statusMsg = "Injected full file into AI Terminal"
-	}
+	m.terminalInput = contextText
+	m.statusMsg = "Injected full file into Terminal"
 	m.isError = false
 	m.active = "terminal"
 	m.textarea.Blur()
@@ -703,11 +671,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Error != "" {
 			output = "\nError: " + msg.Error + "\n"
 		}
-		if msg.IsAICmd {
-			m.aiTerminalBuf.WriteString(output)
-		} else {
-			m.terminalBuf.WriteString(output)
-		}
+		m.terminalBuf.WriteString(output)
 
 	case gitBranchMsg:
 		if msg.Error == "" {
@@ -727,9 +691,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Data string `json:"data"`
 			}
 			json.Unmarshal(msg.Data, &data)
-			// Write to both terminal buffers so streaming shows everywhere
 			m.terminalBuf.WriteString(data.Data)
-			m.aiTerminalBuf.WriteString(data.Data)
 		}
 		return m, waitForEvent(m.bridge)
 
@@ -1062,7 +1024,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.active == "terminal" && (m.layoutMode == 0) {
 				// When in classic mode with terminal active, Ctrl+L clears terminal instead of cycling layout
 				m.terminalBuf.Reset()
-				m.aiTerminalBuf.Reset()
 				return m, nil
 			}
 			cycleLayout(&m)
@@ -1077,39 +1038,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// --- AI Agent Launcher (Alt+1..5) ---
 		case "alt+1":
 			m.aiAgentName = "Claude"
-			if m.layoutMode == 0 {
-				m.terminalInput = "claude"
-			} else {
-				m.aiTerminalInput = "claude"
-			}
+			m.terminalInput = "claude"
 			return m, m.submitAITerminal()
 		case "alt+2":
 			m.aiAgentName = "Codex"
-			if m.layoutMode == 0 {
-				m.terminalInput = "codex"
-			} else {
-				m.aiTerminalInput = "codex"
-			}
+			m.terminalInput = "codex"
 			return m, m.submitAITerminal()
 		case "alt+3":
 			m.aiAgentName = "Gemini"
-			if m.layoutMode == 0 {
-				m.terminalInput = "gemini"
-			} else {
-				m.aiTerminalInput = "gemini"
-			}
+			m.terminalInput = "gemini"
 			return m, m.submitAITerminal()
 		case "alt+4":
 			m.aiAgentName = "Aider"
-			if m.layoutMode == 0 {
-				m.terminalInput = "aider"
-			} else {
-				m.aiTerminalInput = "aider"
-			}
+			m.terminalInput = "aider"
 			return m, m.submitAITerminal()
 		case "alt+5":
 			m.aiAgentName = "Custom"
-			m.aiTerminalInput = ""
+			m.terminalInput = ""
 			m.statusMsg = "Custom AI agent selected. Type your command."
 			m.isError = false
 			m.active = "terminal"
@@ -1209,10 +1154,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							if msg.X >= pillX && msg.X < pillX+pillW {
 								m.aiAgentName = p
 								if i < 4 {
-									m.aiTerminalInput = strings.ToLower(p)
+									m.terminalInput = strings.ToLower(p)
 									return m, m.submitAITerminal()
 								} else {
-									m.aiTerminalInput = ""
+									m.terminalInput = ""
 									m.statusMsg = "Custom AI agent selected. Type your command."
 									m.isError = false
 									m.active = "terminal"
@@ -1249,10 +1194,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							if msg.X >= pillX && msg.X < pillX+pillW {
 								m.aiAgentName = p
 								if i < 4 {
-									m.aiTerminalInput = strings.ToLower(p)
+									m.terminalInput = strings.ToLower(p)
 									return m, m.submitAITerminal()
 								} else {
-									m.aiTerminalInput = ""
+									m.terminalInput = ""
 									m.statusMsg = "Custom AI agent selected. Type your command."
 									m.isError = false
 									m.active = "terminal"
@@ -1360,39 +1305,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 
 		case "terminal":
-			// Determine which terminal buffer/input to use based on layout mode
-			isAITerminal := m.layoutMode == 1 || m.layoutMode == 3 || (m.layoutMode == 0 && m.aiAgentName != "")
 			buf := m.terminalBuf
 			input := m.terminalInput
 			history := m.terminalHistory
 			histIdx := m.terminalHistIdx
-			if m.layoutMode == 1 || m.layoutMode == 3 {
-				buf = m.aiTerminalBuf
-				input = m.aiTerminalInput
-				history = m.aiTerminalHistory
-				histIdx = m.aiTerminalHistIdx
-			}
+
+			isAITerminal := m.aiAgentName != ""
 
 			switch msg.String() {
 			case "enter":
 				if input != "" {
 					history = append(history, input)
 					if isAITerminal {
-						if m.layoutMode == 1 || m.layoutMode == 3 {
-							m.aiTerminalHistory = history
-							m.aiTerminalBuf.WriteString("\nAI ❯ " + input + "\n")
-						} else {
-							m.terminalHistory = history
-							m.terminalBuf.WriteString("\nAI ❯ " + input + "\n")
-						}
-						cmd := runCommand(m.bridge, input, true)
-						if m.layoutMode == 1 || m.layoutMode == 3 {
-							m.aiTerminalInput = ""
-							m.aiTerminalHistIdx = -1
-						} else {
-							m.terminalInput = ""
-							m.terminalHistIdx = -1
-						}
+						m.terminalHistory = history
+						m.terminalBuf.WriteString("\nAI ❯ " + input + "\n")
+						cmd := runCommand(m.bridge, input)
+						m.terminalInput = ""
+						m.terminalHistIdx = -1
 						return m, cmd
 					} else {
 						m.terminalHistory = history
@@ -1411,44 +1340,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					} else if histIdx > 0 {
 						histIdx--
 					}
-					if isAITerminal {
-						m.aiTerminalHistIdx = histIdx
-						m.aiTerminalInput = m.aiTerminalHistory[histIdx]
-					} else {
-						m.terminalHistIdx = histIdx
-						m.terminalInput = m.terminalHistory[histIdx]
-					}
+					m.terminalHistIdx = histIdx
+					m.terminalInput = m.terminalHistory[histIdx]
 				}
 			case "down":
 				if histIdx != -1 {
 					if histIdx < len(history)-1 {
 						histIdx++
-						if isAITerminal {
-							m.aiTerminalHistIdx = histIdx
-							m.aiTerminalInput = m.aiTerminalHistory[histIdx]
-						} else {
-							m.terminalHistIdx = histIdx
-							m.terminalInput = m.terminalHistory[histIdx]
-						}
+						m.terminalHistIdx = histIdx
+						m.terminalInput = m.terminalHistory[histIdx]
 					} else {
-						if isAITerminal {
-							m.aiTerminalHistIdx = -1
-							m.aiTerminalInput = ""
-						} else {
-							m.terminalHistIdx = -1
-							m.terminalInput = ""
-						}
+						m.terminalHistIdx = -1
+						m.terminalInput = ""
 					}
 				}
 			case "backspace":
-				if isAITerminal {
-					if len(m.aiTerminalInput) > 0 {
-						m.aiTerminalInput = m.aiTerminalInput[:len(m.aiTerminalInput)-1]
-					}
-				} else {
-					if len(m.terminalInput) > 0 {
-						m.terminalInput = m.terminalInput[:len(m.terminalInput)-1]
-					}
+				if len(m.terminalInput) > 0 {
+					m.terminalInput = m.terminalInput[:len(m.terminalInput)-1]
 				}
 			case "ctrl+c":
 				if !isAITerminal {
@@ -1458,17 +1366,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "ctrl+l":
 				buf.Reset()
-				if isAITerminal {
-					// For AI terminal, also reset the buffer on the remote side
-				}
 				return m, nil
 			default:
 				if len(msg.String()) == 1 {
-					if isAITerminal {
-						m.aiTerminalInput += msg.String()
-					} else {
-						m.terminalInput += msg.String()
-					}
+					m.terminalInput += msg.String()
 				}
 			}
 		}
@@ -1674,7 +1575,7 @@ func renderFiles(width, height int, active bool, theme Theme, tree []FileNode, c
 	return renderPanel("Files", width, height, active, theme, strings.Join(lines, "\n"))
 }
 
-func renderTerminal(width, height int, active bool, theme Theme, content string, input string, cursorVisible bool, agentName string) string {
+func renderTerminal(panelTitle string, width, height int, active bool, theme Theme, content string, input string, cursorVisible bool, agentName string) string {
 	innerWidth := width - 2
 	innerHeight := height - 2
 
@@ -1728,66 +1629,12 @@ func renderTerminal(width, height int, active bool, theme Theme, content string,
 	inputLine += strings.Repeat(" ", innerWidth-lipgloss.Width(inputLine))
 
 	full := agentBar + "\n" + separator + "\n" + strings.Join(lines, "\n") + "\n" + inputLine
-	return renderPanel("Terminal", width, height, active, theme, full)
+	return renderPanel(panelTitle, width, height, active, theme, full)
 }
 
 // ==============================================================================
-// AI Terminal Render
+// AI Agent Helpers
 // ==============================================================================
-
-func renderAITerminal(width, height int, active bool, theme Theme, content string, input string, cursorVisible bool, agentName string) string {
-	innerWidth := width - 2
-	innerHeight := height - 2
-
-	// --- Agent Launcher Bar ---
-	agentBarWidth := innerWidth
-	agentBar := renderAgentBar(agentBarWidth, theme, agentName)
-
-	// --- Separator ---
-	sepStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Border))
-	separator := sepStyle.Render(strings.Repeat("─", agentBarWidth))
-
-	// Available height for terminal content + input
-	barLines := strings.Count(agentBar, "\n") + 1 + 1 // bar + separator
-	availHeight := innerHeight - barLines
-	if availHeight < 2 { availHeight = 2 }
-
-	outputHeight := availHeight - 1
-	rawLines := strings.Split(content, "\n")
-	
-	var lines []string
-	if len(rawLines) > outputHeight {
-		rawLines = rawLines[len(rawLines)-outputHeight:]
-	}
-	
-	for _, line := range rawLines {
-		if lipgloss.Width(line) > innerWidth {
-			line = line[:innerWidth]
-		}
-		lines = append(lines, line+strings.Repeat(" ", innerWidth-lipgloss.Width(line)))
-	}
-	for len(lines) < outputHeight {
-		lines = append(lines, strings.Repeat(" ", innerWidth))
-	}
-
-	// Input line with AI prompt
-	promptStr := "AI ❯ "
-	cursor := ""
-	if cursorVisible && active {
-		cursor = "█"
-	}
-	
-	promptStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Accent)).Bold(true)
-	inputLine := promptStyle.Render(promptStr) + input + cursor
-	if lipgloss.Width(inputLine) > innerWidth {
-		inputLine = inputLine[lipgloss.Width(inputLine)-innerWidth:]
-	}
-	inputLine += strings.Repeat(" ", innerWidth-lipgloss.Width(inputLine))
-
-	// Build full AI terminal content
-	aiContent := agentBar + "\n" + separator + "\n" + strings.Join(lines, "\n") + "\n" + inputLine
-	return renderPanel("AI Terminal", width, height, active, theme, aiContent)
-}
 
 func renderAgentBar(width int, theme Theme, activeAgent string) string {
 	agents := []struct {
@@ -2068,7 +1915,7 @@ func (m model) View() string {
 			if len(panels) > 0 {
 				panels = append(panels, divStyle)
 			}
-			panels = append(panels, renderTerminal(terminalW, mainH, m.active == "terminal", t, m.terminalBuf.String(), m.terminalInput, m.cursorVisible, m.aiAgentName))
+			panels = append(panels, renderTerminal("Terminal", terminalW, mainH, m.active == "terminal", t, m.terminalBuf.String(), m.terminalInput, m.cursorVisible, m.aiAgentName))
 		}
 
 		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, panels...)
@@ -2096,7 +1943,7 @@ func (m model) View() string {
 		}
 		editorPanel := renderPanel("Editor", editorW, mainH, m.active == "editor", t, editorView)
 		divStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Width(gap).Render("│")
-		aiTermPanel := renderAITerminal(aiTermW, mainH, m.active == "terminal", t, m.aiTerminalBuf.String(), m.aiTerminalInput, m.cursorVisible, m.aiAgentName)
+		aiTermPanel := renderTerminal("AI Terminal", aiTermW, mainH, m.active == "terminal", t, m.terminalBuf.String(), m.terminalInput, m.cursorVisible, m.aiAgentName)
 		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, editorPanel, divStyle, aiTermPanel)
 
 	case 2: // Focus: Just Editor (100%)
@@ -2142,7 +1989,7 @@ func (m model) View() string {
 		}
 		editorPanel := renderPanel("Editor", editorW, mainH, m.active == "editor", t, editorView)
 		divStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Width(gap).Render("│")
-		aiTermPanel := renderAITerminal(aiTermW, mainH, m.active == "terminal", t, m.aiTerminalBuf.String(), m.aiTerminalInput, m.cursorVisible, m.aiAgentName)
+		aiTermPanel := renderTerminal("AI Terminal", aiTermW, mainH, m.active == "terminal", t, m.terminalBuf.String(), m.terminalInput, m.cursorVisible, m.aiAgentName)
 		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, editorPanel, divStyle, aiTermPanel)
 	}
 
