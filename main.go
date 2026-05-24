@@ -901,12 +901,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusMsg = "Files panel hidden in current layout"
 				m.isError = true
 			}
+			return m, nil
 		case "ctrl+2":
 			m.active = "editor"
 			m.textarea.Focus()
+			return m, nil
 		case "ctrl+3":
 			m.active = "terminal"
 			m.textarea.Blur()
+			return m, nil
 		case "ctrl+s":
 			if m.currentPath != "" {
 				m.hasChanges = false
@@ -963,6 +966,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchQuery = ""
 				m.searchMatches = nil
 				m.searchIdx = 0
+				m.active = "editor"
+				m.textarea.Focus()
+				return m, nil
 			}
 		case "ctrl+shift+f":
 			m.globalSearchOpen = true
@@ -979,6 +985,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case "ctrl+l":
+			if m.active == "terminal" && (m.layoutMode == 0) {
+				// When in classic mode with terminal active, Ctrl+L clears terminal instead of cycling layout
+				m.terminalBuf.Reset()
+				m.aiTerminalBuf.Reset()
+				return m, nil
+			}
 			cycleLayout(&m)
 			return m, nil
 		case "ctrl+t":
