@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -65,6 +65,549 @@ type searchResultsMsg struct {
 }
 
 // ==============================================================================
+// Editor State
+// ==============================================================================
+
+// EditorSnapshot stores the full editor state for undo/redo.
+type EditorSnapshot struct {
+	lines     []string
+	cursorRow int
+	cursorCol int
+	scrollTop int
+}
+
+// EditorState is the core text editing engine with full cursor, selection,
+// clipboard, undo/redo, and virtual scrolling support.
+type EditorState struct {
+	lines      []string        // file content split by lines
+	cursorRow  int             // current cursor row (0-based)
+	cursorCol  int             // current cursor column (0-based)
+	scrollTop  int             // first visible line index
+	filePath   string          // current open file path
+	modified   bool            // unsaved changes flag
+	selStart   [2]int          // selection start [row, col] (-1,-1 = none)
+	selEnd     [2]int          // selection end [row, col]
+	history    []EditorSnapshot // ordered history of states for undo/redo
+	historyIdx int              // current position in history (-1 = none)
+	clipText   string          // internal clipboard (in-app)
+	visibleH   int             // visible line count (set from panel height)
+	maxUndo    int             // max undo/redo snapshots
+}
+
+func newEditorState() EditorState {
+	return EditorState{
+		lines:      []string{""},
+		cursorRow:  0,
+		cursorCol:  0,
+		selStart:   [2]int{-1, -1},
+		selEnd:     [2]int{-1, -1},
+		maxUndo:    100,
+		historyIdx: -1,
+	}
+}
+
+// --- Text manipulation helpers ---
+
+func (e *EditorState) lineLen() int {
+	if e.cursorRow < 0 || e.cursorRow >= len(e.lines) {
+		return 0
+	}
+	return len(e.lines[e.cursorRow])
+}
+
+// safeCol ensures cursorCol doesn't exceed the current line length.
+func (e *EditorState) safeCol() {
+	ll := e.lineLen()
+	if e.cursorCol > ll {
+		e.cursorCol = ll
+	}
+	if e.cursorCol < 0 {
+		e.cursorCol = 0
+	}
+}
+
+// --- Snapshot management (undo/redo) ---
+
+func (e *EditorState) saveSnapshot() {
+	// Truncate any redo history if we've undone
+	if e.historyIdx < len(e.history)-1 {
+		e.history = e.history[:e.historyIdx+1]
+	}
+	// Save current state
+	linesCopy := make([]string, len(e.lines))
+	copy(linesCopy, e.lines)
+	snap := EditorSnapshot{
+		lines:     linesCopy,
+		cursorRow: e.cursorRow,
+		cursorCol: e.cursorCol,
+		scrollTop: e.scrollTop,
+	}
+	e.history = append(e.history, snap)
+	e.historyIdx = len(e.history) - 1
+	if len(e.history) > e.maxUndo {
+		e.history = e.history[1:]
+		e.historyIdx--
+	}
+}
+
+func (e *EditorState) undo() bool {
+	if e.historyIdx < 0 {
+		return false
+	}
+	// Save current state for redo by swapping with history[historyIdx]
+	linesCopy := make([]string, len(e.lines))
+	copy(linesCopy, e.lines)
+	currentSnap := EditorSnapshot{
+		lines:     linesCopy,
+		cursorRow: e.cursorRow,
+		cursorCol: e.cursorCol,
+		scrollTop: e.scrollTop,
+	}
+	snap := e.history[e.historyIdx]
+	e.history[e.historyIdx] = currentSnap
+	e.historyIdx--
+	// Restore previous state
+	e.lines = snap.lines
+	e.cursorRow = snap.cursorRow
+	e.cursorCol = snap.cursorCol
+	e.scrollTop = snap.scrollTop
+	return true
+}
+
+func (e *EditorState) redo() bool {
+	if e.historyIdx >= len(e.history)-1 {
+		return false
+	}
+	e.historyIdx++
+	// Save current state for undo by swapping with history[historyIdx]
+	linesCopy := make([]string, len(e.lines))
+	copy(linesCopy, e.lines)
+	currentSnap := EditorSnapshot{
+		lines:     linesCopy,
+		cursorRow: e.cursorRow,
+		cursorCol: e.cursorCol,
+		scrollTop: e.scrollTop,
+	}
+	snap := e.history[e.historyIdx]
+	e.history[e.historyIdx] = currentSnap
+	// Restore next state
+	e.lines = snap.lines
+	e.cursorRow = snap.cursorRow
+	e.cursorCol = snap.cursorCol
+	e.scrollTop = snap.scrollTop
+	return true
+}
+
+// --- Selection helpers ---
+
+func (e *EditorState) clearSelection() {
+	e.selStart = [2]int{-1, -1}
+	e.selEnd = [2]int{-1, -1}
+}
+
+func (e *EditorState) hasSelection() bool {
+	return e.selStart[0] != -1
+}
+
+// selRange returns the normalized [startRow, startCol, endRow, endCol] of the selection.
+func (e *EditorState) selRange() (sr, sc, er, ec int) {
+	if !e.hasSelection() {
+		return e.cursorRow, e.cursorCol, e.cursorRow, e.cursorCol
+	}
+	if e.selStart[0] < e.selEnd[0] || (e.selStart[0] == e.selEnd[0] && e.selStart[1] < e.selEnd[1]) {
+		return e.selStart[0], e.selStart[1], e.selEnd[0], e.selEnd[1]
+	}
+	return e.selEnd[0], e.selEnd[1], e.selStart[0], e.selStart[1]
+}
+
+func (e *EditorState) deleteSelection() string {
+	sr, sc, er, ec := e.selRange()
+	deleted := e.getText(sr, sc, er, ec)
+
+	// Build new lines without the selection
+	var newLines []string
+	for i := 0; i < len(e.lines); i++ {
+		if i < sr || i > er {
+			newLines = append(newLines, e.lines[i])
+		} else if i == sr && i == er {
+			// Same line
+			newLines = append(newLines, e.lines[i][:sc]+e.lines[i][ec:])
+		} else if i == sr {
+			newLines = append(newLines, e.lines[i][:sc])
+		} else if i == er {
+			if len(newLines) > 0 {
+				newLines[len(newLines)-1] += e.lines[i][ec:]
+			}
+		}
+		// Lines in between are dropped
+	}
+
+	// Handle case where all lines got merged
+	if len(newLines) == 0 {
+		newLines = []string{""}
+	}
+
+	e.lines = newLines
+	e.cursorRow = sr
+	e.cursorCol = sc
+	e.clearSelection()
+	return deleted
+}
+
+func (e *EditorState) getText(sr, sc, er, ec int) string {
+	if sr == er {
+		return e.lines[sr][sc:ec]
+	}
+	var parts []string
+	parts = append(parts, e.lines[sr][sc:])
+	for i := sr + 1; i < er; i++ {
+		parts = append(parts, e.lines[i])
+	}
+	parts = append(parts, e.lines[er][:ec])
+	return strings.Join(parts, "\n")
+}
+
+// --- Cursor movement ---
+
+func (e *EditorState) moveLeft() {
+	e.clearSelection()
+	if e.cursorCol > 0 {
+		e.cursorCol--
+	} else if e.cursorRow > 0 {
+		e.cursorRow--
+		e.cursorCol = len(e.lines[e.cursorRow])
+	}
+}
+
+func (e *EditorState) moveRight() {
+	e.clearSelection()
+	if e.cursorCol < len(e.lines[e.cursorRow]) {
+		e.cursorCol++
+	} else if e.cursorRow < len(e.lines)-1 {
+		e.cursorRow++
+		e.cursorCol = 0
+	}
+}
+
+func (e *EditorState) moveUp() {
+	e.clearSelection()
+	if e.cursorRow > 0 {
+		e.cursorRow--
+		e.safeCol()
+	}
+}
+
+func (e *EditorState) moveDown() {
+	e.clearSelection()
+	if e.cursorRow < len(e.lines)-1 {
+		e.cursorRow++
+		e.safeCol()
+	}
+}
+
+func (e *EditorState) moveHome() {
+	e.clearSelection()
+	e.cursorCol = 0
+}
+
+func (e *EditorState) moveEnd() {
+	e.clearSelection()
+	e.cursorCol = len(e.lines[e.cursorRow])
+}
+
+func (e *EditorState) moveToFirstLine() {
+	e.clearSelection()
+	e.cursorRow = 0
+	e.cursorCol = 0
+}
+
+func (e *EditorState) moveToLastLine() {
+	e.clearSelection()
+	e.cursorRow = len(e.lines) - 1
+	e.cursorCol = len(e.lines[e.cursorRow])
+}
+
+func (e *EditorState) moveWordLeft() {
+	e.clearSelection()
+	line := e.lines[e.cursorRow]
+	if e.cursorCol == 0 {
+		if e.cursorRow > 0 {
+			e.cursorRow--
+			e.cursorCol = len(e.lines[e.cursorRow])
+		}
+		return
+	}
+	col := e.cursorCol - 1
+	// Skip whitespace
+	for col > 0 && (line[col] == ' ' || line[col] == '\t') {
+		col--
+	}
+	// Skip word
+	for col > 0 && !(line[col] == ' ' || line[col] == '\t') {
+		col--
+	}
+	if col == 0 && !(line[0] == ' ' || line[0] == '\t') {
+		e.cursorCol = 0
+	} else {
+		e.cursorCol = col + 1
+	}
+}
+
+func (e *EditorState) moveWordRight() {
+	e.clearSelection()
+	line := e.lines[e.cursorRow]
+	if e.cursorCol >= len(line) {
+		if e.cursorRow < len(e.lines)-1 {
+			e.cursorRow++
+			e.cursorCol = 0
+		}
+		return
+	}
+	col := e.cursorCol
+	// Skip word
+	for col < len(line) && !(line[col] == ' ' || line[col] == '\t') {
+		col++
+	}
+	// Skip whitespace
+	for col < len(line) && (line[col] == ' ' || line[col] == '\t') {
+		col++
+	}
+	e.cursorCol = col
+}
+
+// --- Selection movement ---
+
+func (e *EditorState) selectLeft() {
+	if !e.hasSelection() {
+		e.selStart = [2]int{e.cursorRow, e.cursorCol}
+	}
+	e.moveLeft()
+	e.selEnd = [2]int{e.cursorRow, e.cursorCol}
+}
+
+func (e *EditorState) selectRight() {
+	if !e.hasSelection() {
+		e.selStart = [2]int{e.cursorRow, e.cursorCol}
+	}
+	e.moveRight()
+	e.selEnd = [2]int{e.cursorRow, e.cursorCol}
+}
+
+func (e *EditorState) selectUp() {
+	if !e.hasSelection() {
+		e.selStart = [2]int{e.cursorRow, e.cursorCol}
+	}
+	e.moveUp()
+	e.selEnd = [2]int{e.cursorRow, e.cursorCol}
+}
+
+func (e *EditorState) selectDown() {
+	if !e.hasSelection() {
+		e.selStart = [2]int{e.cursorRow, e.cursorCol}
+	}
+	e.moveDown()
+	e.selEnd = [2]int{e.cursorRow, e.cursorCol}
+}
+
+func (e *EditorState) selectAll() {
+	e.selStart = [2]int{0, 0}
+	lastRow := len(e.lines) - 1
+	e.selEnd = [2]int{lastRow, len(e.lines[lastRow])}
+}
+
+func (e *EditorState) selectHome() {
+	if !e.hasSelection() {
+		e.selStart = [2]int{e.cursorRow, e.cursorCol}
+	}
+	e.moveHome()
+	e.selEnd = [2]int{e.cursorRow, e.cursorCol}
+}
+
+func (e *EditorState) selectEnd() {
+	if !e.hasSelection() {
+		e.selStart = [2]int{e.cursorRow, e.cursorCol}
+	}
+	e.moveEnd()
+	e.selEnd = [2]int{e.cursorRow, e.cursorCol}
+}
+
+// --- Text editing ---
+
+func (e *EditorState) insertAtCursor(text string) {
+	e.saveSnapshot()
+	if e.hasSelection() {
+		e.deleteSelection()
+	}
+	line := e.lines[e.cursorRow]
+	newLine := line[:e.cursorCol] + text + line[e.cursorCol:]
+	e.lines[e.cursorRow] = newLine
+	e.cursorCol += len(text)
+	e.clearSelection()
+	e.modified = true
+}
+
+func (e *EditorState) backspace() {
+	e.saveSnapshot()
+	if e.hasSelection() {
+		e.deleteSelection()
+		e.modified = true
+		return
+	}
+	if e.cursorCol > 0 {
+		line := e.lines[e.cursorRow]
+		e.lines[e.cursorRow] = line[:e.cursorCol-1] + line[e.cursorCol:]
+		e.cursorCol--
+	} else if e.cursorRow > 0 {
+		// Join with previous line
+		prevLine := e.lines[e.cursorRow-1]
+		e.cursorCol = len(prevLine)
+		e.lines[e.cursorRow-1] = prevLine + e.lines[e.cursorRow]
+		e.lines = append(e.lines[:e.cursorRow], e.lines[e.cursorRow+1:]...)
+		e.cursorRow--
+	}
+	e.clearSelection()
+	e.modified = true
+}
+
+func (e *EditorState) deleteChar() {
+	e.saveSnapshot()
+	if e.hasSelection() {
+		e.deleteSelection()
+		e.modified = true
+		return
+	}
+	line := e.lines[e.cursorRow]
+	if e.cursorCol < len(line) {
+		e.lines[e.cursorRow] = line[:e.cursorCol] + line[e.cursorCol+1:]
+	} else if e.cursorRow < len(e.lines)-1 {
+		// Join with next line
+		e.lines[e.cursorRow] = line + e.lines[e.cursorRow+1]
+		e.lines = append(e.lines[:e.cursorRow+1], e.lines[e.cursorRow+2:]...)
+	}
+	e.clearSelection()
+	e.modified = true
+}
+
+func (e *EditorState) insertNewline() {
+	e.saveSnapshot()
+	if e.hasSelection() {
+		e.deleteSelection()
+	}
+	line := e.lines[e.cursorRow]
+	rightPart := line[e.cursorCol:]
+	e.lines[e.cursorRow] = line[:e.cursorCol]
+	// Insert new line after current
+	newLines := make([]string, 0, len(e.lines)+1)
+	newLines = append(newLines, e.lines[:e.cursorRow+1]...)
+	newLines = append(newLines, rightPart)
+	newLines = append(newLines, e.lines[e.cursorRow+1:]...)
+	e.lines = newLines
+	e.cursorRow++
+	e.cursorCol = 0
+	e.clearSelection()
+	e.modified = true
+}
+
+func (e *EditorState) insertTab() {
+	e.insertAtCursor("    ")
+}
+
+// --- Clipboard ---
+
+func (e *EditorState) copySelection() string {
+	if !e.hasSelection() {
+		return ""
+	}
+	sr, sc, er, ec := e.selRange()
+	text := e.getText(sr, sc, er, ec)
+	e.clipText = text
+	return text
+}
+
+func (e *EditorState) cutSelection() string {
+	if !e.hasSelection() {
+		return ""
+	}
+	e.saveSnapshot()
+	text := e.deleteSelection()
+	e.clipText = text
+	e.modified = true
+	return text
+}
+
+func (e *EditorState) pasteClipboard() {
+	if e.clipText == "" {
+		return
+	}
+	e.insertAtCursor(e.clipText)
+}
+
+// --- Scrolling ---
+
+func (e *EditorState) adjustScroll(visibleLines int) {
+	e.visibleH = visibleLines
+	if visibleLines <= 0 {
+		return
+	}
+	if e.cursorRow < e.scrollTop {
+		e.scrollTop = e.cursorRow
+	}
+	if e.cursorRow >= e.scrollTop+visibleLines {
+		e.scrollTop = e.cursorRow - visibleLines + 1
+	}
+	if e.scrollTop < 0 {
+		e.scrollTop = 0
+	}
+}
+
+// content returns the full text as a single string.
+func (e *EditorState) content() string {
+	return strings.Join(e.lines, "\n")
+}
+
+// loadFile sets the editor content from file text.
+func (e *EditorState) loadFile(path, text string) {
+	if text == "" {
+		e.lines = []string{""}
+	} else {
+		e.lines = strings.Split(text, "\n")
+	}
+	e.filePath = path
+	e.cursorRow = 0
+	e.cursorCol = 0
+	e.scrollTop = 0
+	e.modified = false
+	e.clearSelection()
+	e.history = nil
+	e.historyIdx = -1
+}
+
+// editorTitle returns the display title for the editor panel.
+func (e *EditorState) editorTitle() string {
+	if e.filePath == "" {
+		return "Editor"
+	}
+	name := filepath.Base(e.filePath)
+	if e.modified {
+		name += " ●"
+	}
+	return name
+}
+
+// closeFile clears the editor state.
+func (e *EditorState) closeFile() {
+	e.lines = []string{""}
+	e.filePath = ""
+	e.cursorRow = 0
+	e.cursorCol = 0
+	e.scrollTop = 0
+	e.modified = false
+	e.clearSelection()
+	e.history = nil
+	e.historyIdx = -1
+}
+
+// ==============================================================================
 // Model
 // ==============================================================================
 
@@ -97,8 +640,8 @@ type model struct {
 	currentTheme    Theme
 	themeIdx        int
 	
-	// Editor
-	textarea        textarea.Model
+	// Editor (custom full-feature text editor)
+	editor          EditorState
 	
 	// Files
 	rootNode        FileNode
@@ -118,20 +661,12 @@ type model struct {
 	overlayInput    string
 	overlayTitle    string
 	
-	// Undo/Redo
-	undoStack       []string
-	redoStack       []string
-	maxUndo         int
-	
 	// Status
 	statusMsg       string
 	isError         bool
 	currentLang     string
 	gitBranch       string
 	gitDirty        bool
-	cursorLine      int
-	cursorCol       int
-	hasChanges      bool
 	
 	// Search
 	searchOpen      bool
@@ -182,13 +717,7 @@ func initialModel() model {
 			break
 		}
 	}
-
 	b, _ := NewBridge("python") // Assume python is in PATH
-
-	ta := textarea.New()
-	ta.Placeholder = "Open a file to start editing..."
-	ta.FocusedStyle.CursorLine = lipgloss.NewStyle().Background(lipgloss.Color(theme.CursorLine))
-	ta.ShowLineNumbers = true
 
 	// Find theme index to match saved config
 	themeIdx := 0
@@ -211,10 +740,7 @@ func initialModel() model {
 		currentFolder:     filepath.Base(cwd),
 		currentTheme:      theme,
 		themeIdx:          themeIdx,
-		textarea:          ta,
-		undoStack:         []string{},
-		redoStack:         []string{},
-		maxUndo:           100,
+		editor:            newEditorState(),
 		terminalBuf:       &strings.Builder{},
 		terminalHistIdx:   -1,
 		aiTerminalBuf:     &strings.Builder{},
@@ -479,7 +1005,6 @@ func (m *model) submitAITerminal() tea.Cmd {
 
 	cmd := runCommand(m.bridge, input, true)
 	m.active = "terminal"
-	m.textarea.Blur()
 	return cmd
 }
 
@@ -498,29 +1023,8 @@ func (m *model) injectContextFilePath() tea.Cmd {
 		m.statusMsg = "Injected file path into AI Terminal"
 	}
 	m.isError = false
-	m.active = "terminal"
-	m.textarea.Blur()
-	return nil
-}
-
-// updateCursorPos updates the tracked cursor line and column from the textarea.
-func (m *model) updateCursorPos() {
-	content := m.textarea.Value()
-	lines := strings.Split(content, "\n")
-	lineIdx := m.textarea.Line()
-	if lineIdx < 0 {
-		lineIdx = 0
-	}
-	if lineIdx < len(lines) {
-		m.cursorLine = lineIdx
-		m.cursorCol = len(lines[lineIdx])
-	} else if len(lines) > 0 {
-		m.cursorLine = len(lines) - 1
-		m.cursorCol = len(lines[len(lines)-1])
-	} else {
-		m.cursorLine = 0
-		m.cursorCol = 0
-	}
+			m.active = "terminal"
+			return nil
 }
 
 func (m *model) injectContextSelection() tea.Cmd {
@@ -529,12 +1033,12 @@ func (m *model) injectContextSelection() tea.Cmd {
 		m.isError = true
 		return nil
 	}
-	content := m.textarea.Value()
+	content := m.editor.content()
 	fname := filepath.Base(m.currentPath)
 	contextText := "Here is the current file (" + fname + "):"
 
 	lines := strings.Split(content, "\n")
-	cursorLine := m.cursorLine
+	cursorLine := m.editor.cursorRow
 	if cursorLine < len(lines) {
 		start := cursorLine - 3
 		if start < 0 { start = 0 }
@@ -553,7 +1057,6 @@ func (m *model) injectContextSelection() tea.Cmd {
 	}
 	m.isError = false
 	m.active = "terminal"
-	m.textarea.Blur()
 	return nil
 }
 
@@ -564,7 +1067,7 @@ func (m *model) injectContextFullFile() tea.Cmd {
 		return nil
 	}
 	fname := filepath.Base(m.currentPath)
-	content := m.textarea.Value()
+	content := m.editor.content()
 	contextText := "Here is my current file (" + fname + "):\n" + content + "\n\nPlease help me with:"
 
 	if m.layoutMode == 0 {
@@ -576,7 +1079,6 @@ func (m *model) injectContextFullFile() tea.Cmd {
 	}
 	m.isError = false
 	m.active = "terminal"
-	m.textarea.Blur()
 	return nil
 }
 
@@ -606,7 +1108,6 @@ func cycleLayout(m *model) {
 	}
 	if m.layoutMode != 0 && m.active == "files" {
 		m.active = "editor"
-		m.textarea.Focus()
 	}
 	saveConfig(m.currentTheme.Name, m.layoutMode)
 	layoutNames := []string{"Layout: Classic", "Layout: AI Developer", "Layout: Focus", "Layout: Terminal Focus"}
@@ -677,11 +1178,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "Read error: " + msg.Error
 			m.isError = true
 		} else {
+			m.editor.loadFile(msg.Path, msg.Content)
 			m.currentPath = msg.Path
 			m.currentLang = detectLanguage(msg.Path)
-			m.textarea.SetValue(msg.Content)
 			m.active = "editor"
-			m.textarea.Focus()
 			m.statusMsg = "Opened " + filepath.Base(msg.Path)
 			m.isError = false
 		}
@@ -693,7 +1193,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.statusMsg = "Saved " + filepath.Base(m.currentPath)
 			m.isError = false
-			m.hasChanges = false
+			m.editor.modified = false
 			cwd2, _ := os.Getwd()
 			cmds = append(cmds, listDir(m.bridge, cwd2))
 		}
@@ -750,12 +1250,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.zenMode = false
 				return m, nil
 			default:
-				var cmd tea.Cmd
-				m.textarea, cmd = m.textarea.Update(msg)
-				if m.currentPath != "" {
-					m.hasChanges = true
+				if m.active == "editor" {
+					m.handleEditorKey(msg.String())
 				}
-				return m, cmd
+				return m, nil
 			}
 		}
 
@@ -832,14 +1330,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "backspace":
 				if len(m.searchQuery) > 0 {
 					m.searchQuery = m.searchQuery[:len(m.searchQuery)-1]
-					m.searchMatches = findMatches(m.textarea.Value(), m.searchQuery)
+					m.searchMatches = findMatches(m.editor.content(), m.searchQuery)
 					m.searchIdx = 0
 				}
 				return m, nil
 			default:
 				if len(msg.String()) == 1 {
 					m.searchQuery += msg.String()
-					m.searchMatches = findMatches(m.textarea.Value(), m.searchQuery)
+					m.searchMatches = findMatches(m.editor.content(), m.searchQuery)
 					m.searchIdx = 0
 				}
 				return m, nil
@@ -912,11 +1410,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Global bindings
 		switch msg.String() {
 		case "ctrl+c":
-			if m.active != "terminal" {
+			if m.active == "editor" {
+				// Fall through to editor panel handler for copy
+			} else if m.active != "terminal" {
 				return m, tea.Quit
 			}
 		case "ctrl+q":
-			if m.hasChanges {
+			if m.editor.modified {
 				m.overlayMode = "quit_confirm"
 				m.overlayInput = ""
 				m.overlayTitle = "Unsaved changes. Quit anyway? (y/n)"
@@ -926,7 +1426,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+1":
 			if m.layoutMode == 0 && m.fileTreeVisible {
 				m.active = "files"
-				m.textarea.Blur()
 			} else {
 				m.statusMsg = "Files panel hidden"
 				m.isError = true
@@ -952,8 +1451,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "ctrl+s":
 			if m.currentPath != "" {
-				m.hasChanges = false
-				return m, writeFile(m.bridge, m.currentPath, m.textarea.Value())
+				m.editor.modified = false
+				return m, writeFile(m.bridge, m.currentPath, m.editor.content())
 			}
 		case "ctrl+o":
 			m.overlayMode = "open_folder"
@@ -968,8 +1467,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+w":
 			m.currentPath = ""
 			m.currentLang = "Plain Text"
-			m.textarea.SetValue("")
-			m.hasChanges = false
+			m.editor.closeFile()
 			m.statusMsg = "Closed file"
 			m.isError = false
 		case "ctrl+b":
@@ -1038,10 +1536,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.currentPath != "" {
 				m.searchOpen = true
 				m.searchQuery = ""
-				m.searchMatches = nil
+				m.searchMatches = findMatches(m.editor.content(), "")
 				m.searchIdx = 0
 				m.active = "editor"
-				m.textarea.Focus()
 				return m, nil
 			}
 		case "ctrl+shift+f":
@@ -1070,7 +1567,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+t":
 			m.themeIdx = (m.themeIdx + 1) % len(Themes)
 			m.currentTheme = Themes[m.themeIdx]
-			m.textarea.FocusedStyle.CursorLine = lipgloss.NewStyle().Background(lipgloss.Color(m.currentTheme.CursorLine))
 			saveConfig(m.currentTheme.Name, m.layoutMode)
 			return m, nil
 		
@@ -1112,10 +1608,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.aiTerminalInput = ""
 			m.statusMsg = "Custom AI agent selected. Type your command."
 			m.isError = false
-			m.active = "terminal"
-			m.textarea.Blur()
-			return m, nil
-		
+				m.active = "terminal"
+				return m, nil
+
 		// --- Context Injection ---
 		case "alt+enter":
 			return m, m.injectContextFilePath()
@@ -1155,10 +1650,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.dragStartX = msg.X
 				case msg.X < filesW:
 					m.active = "files"
-					m.textarea.Blur()
+					// Click on a file row in the tree
+					if msg.Y >= 2 && msg.Y-2 < len(m.flatTree) {
+						clickedIdx := msg.Y - 2
+						m.fileCursor = clickedIdx
+						node := m.flatTree[clickedIdx]
+						if node.IsDir {
+							if !m.expanded[node.Path] && (len(node.Children) == 0) {
+								return m, listDir(m.bridge, node.Path)
+							}
+							m.expanded[node.Path] = !m.expanded[node.Path]
+							m.flatTree = flattenTree(m.rootNode, m.expanded)
+						} else {
+							return m, readFile(m.bridge, node.Path)
+						}
+					}
 				case msg.X >= editorStart && msg.X < termStart:
 					m.active = "editor"
-					m.textarea.Focus()
 				case msg.X >= termStart:
 					if msg.Y >= 2 && msg.Y <= 3 {
 						pillX := termStart + 2
@@ -1198,7 +1706,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.dragStartX = msg.X
 				case msg.X < editorW:
 					m.active = "editor"
-					m.textarea.Focus()
 				case msg.X >= aiTermStart:
 					if msg.Y >= 2 && msg.Y <= 3 {
 						pillX := aiTermStart + 2
@@ -1216,7 +1723,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 									m.statusMsg = "Custom AI agent selected. Type your command."
 									m.isError = false
 									m.active = "terminal"
-									m.textarea.Blur()
 									return m, nil
 								}
 							}
@@ -1224,7 +1730,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					}
 					m.active = "terminal"
-					m.textarea.Blur()
 				}
 			} else if m.layoutMode == 3 { // Terminal Focus
 				editorW = (m.width * 40) / 100
@@ -1238,7 +1743,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.dragStartX = msg.X
 				case msg.X < editorW:
 					m.active = "editor"
-					m.textarea.Focus()
 				case msg.X >= aiTermStart:
 					if msg.Y >= 2 && msg.Y <= 3 {
 						pillX := aiTermStart + 2
@@ -1256,7 +1760,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 									m.statusMsg = "Custom AI agent selected. Type your command."
 									m.isError = false
 									m.active = "terminal"
-									m.textarea.Blur()
 									return m, nil
 								}
 							}
@@ -1264,7 +1767,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					}
 					m.active = "terminal"
-					m.textarea.Blur()
 				}
 			}
 			// Focus mode (2) has no panels to click - just editor
@@ -1342,22 +1844,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "editor":
-			// Save content for undo only on content-modifying keys
-			prev := m.textarea.Value()
-			var cmd tea.Cmd
-			m.textarea, cmd = m.textarea.Update(msg)
-			curr := m.textarea.Value()
-			if curr != prev && m.currentPath != "" {
-				m.undoStack = append(m.undoStack, prev)
-				if len(m.undoStack) > m.maxUndo {
-					m.undoStack = m.undoStack[len(m.undoStack)-m.maxUndo:]
-				}
-				m.redoStack = nil
-				m.hasChanges = true
-			}
-			// Update cursor position after every edit
-			m.updateCursorPos()
-			return m, cmd
+			m.handleEditorKey(msg.String())
+			return m, nil
 
 		case "terminal":
 			// Determine which terminal buffer/input to use based on layout mode
@@ -1537,10 +2025,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if mainH < 0 {
 			mainH = 0
 		}
-		m.textarea.SetWidth(innerEditorW)
-		m.textarea.SetHeight(mainH - 2)
-		if m.textarea.Height() < 1 {
-			m.textarea.SetHeight(1)
+		m.editor.visibleH = mainH - 2
+		if m.editor.visibleH < 1 {
+			m.editor.visibleH = 1
 		}
 	}
 	return m, tea.Batch(cmds...)
@@ -1551,13 +2038,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // ==============================================================================
 
 func renderPanel(title string, width, height int, active bool, theme Theme, content string) string {
-	bg := theme.SurfaceAlt
-	if title == "Editor" {
-		bg = theme.Surface
-	}
-
+	bg := theme.Surface
 	borderColor := theme.Border
 	titleColor := theme.TextMuted
+
 	if active {
 		borderColor = theme.BorderFocused
 		titleColor = theme.Accent
@@ -1570,14 +2054,13 @@ func renderPanel(title string, width, height int, active bool, theme Theme, cont
 	if content == "" {
 		styledContent = lipgloss.Place(innerWidth, innerHeight, lipgloss.Center, lipgloss.Center, "...", lipgloss.WithWhitespaceBackground(lipgloss.Color(bg)))
 	} else {
-		lines := strings.Split(content, "\n")
+		contentLines := strings.Split(content, "\n")
 		var processed []string
 		for i := 0; i < innerHeight; i++ {
-			if i < len(lines) {
-				line := lines[i]
+			if i < len(contentLines) {
+				line := contentLines[i]
 				visWidth := lipgloss.Width(line)
 				if visWidth > innerWidth {
-					// Truncate by visible width, preserving ANSI sequences
 					plain := stripANSI(line)
 					truncPlain := ""
 					w := 0
@@ -1601,16 +2084,28 @@ func renderPanel(title string, width, height int, active bool, theme Theme, cont
 	}
 
 	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(borderColor)).Background(lipgloss.Color(bg))
-	displayTitle := fmt.Sprintf("  %s ", title)
-	styledTitle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color(titleColor)).
-		Background(lipgloss.Color(bg)).
-		Bold(active).
-		Render(displayTitle)
-	
+
+	// Active title gets accent background
+	displayTitle := fmt.Sprintf(" %s ", title)
+	var styledTitle string
+	if active {
+		styledTitle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color(theme.Background)).
+			Background(lipgloss.Color(theme.Accent)).
+			Bold(true).
+			Render(displayTitle)
+	} else {
+		styledTitle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color(titleColor)).
+			Background(lipgloss.Color(bg)).
+			Render(displayTitle)
+	}
+
+	// Top border: ╭─ title ─────────╮
 	leftCorner := borderStyle.Render("╭─")
-	rightCorner := borderStyle.Render("╮")
-	dashCount := width - 2 - lipgloss.Width(styledTitle) - 1
+	rightCorner := borderStyle.Render("─╮")
+	titleWidth := lipgloss.Width(styledTitle)
+	dashCount := width - 4 - titleWidth
 	if dashCount < 0 { dashCount = 0 }
 	topLine := leftCorner + styledTitle + borderStyle.Render(strings.Repeat("─", dashCount)) + rightCorner
 
@@ -1630,6 +2125,49 @@ func renderPanel(title string, width, height int, active bool, theme Theme, cont
 	return topLine + "\n" + middleArea.String() + "\n" + bottomLine
 }
 
+func getFileIcon(name string, isDir bool) string {
+	if isDir {
+		return "\U0001F4C1"
+	}
+	ext := ""
+	for i := len(name) - 1; i >= 0; i-- {
+		if name[i] == '.' {
+			ext = strings.ToLower(name[i:])
+			break
+		}
+	}
+	switch ext {
+	case ".go":
+		return "\U0001F426"
+	case ".py":
+		return "\U0001F40D"
+	case ".js", ".ts", ".jsx", ".tsx":
+		return "\U0001F310"
+	case ".json":
+		return "\U0001F4CB"
+	case ".md":
+		return "\U0001F4DD"
+	case ".css", ".html", ".htm":
+		return "\U0001F3A8"
+	case ".yaml", ".yml", ".toml", ".mod", ".sum":
+		return "\u2699"
+	case ".sh", ".bash", ".ps1", ".bat", ".cmd":
+		return "\U0001F5A5"
+	case ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico":
+		return "\U0001F5BC"
+	case ".zip", ".tar", ".gz", ".rar", ".7z":
+		return "\U0001F4E6"
+	case ".sql", ".db", ".sqlite":
+		return "\U0001F4BE"
+	case ".txt", ".log":
+		return "\U0001F4C4"
+	case ".gitignore":
+		return "\u2699"
+	default:
+		return "\U0001F4C4"
+	}
+}
+
 func renderFiles(width, height int, active bool, theme Theme, tree []FileNode, cursor int, expanded map[string]bool) string {
 	innerWidth := width - 2
 	innerHeight := height - 2
@@ -1637,40 +2175,55 @@ func renderFiles(width, height int, active bool, theme Theme, tree []FileNode, c
 	var lines []string
 	for i, node := range tree {
 		if len(lines) >= innerHeight { break }
-		
+
+		// Build tree branch connectors
 		indent := strings.Repeat("  ", node.Depth)
-		
+
 		var prefix string
 		if node.IsDir {
 			if expanded[node.Path] {
-				prefix = "▼ "
+				prefix = "📂 "
 			} else {
-				prefix = "▶ "
+				prefix = "📁 "
 			}
 		} else {
-			prefix = "  "
+			icon := getFileIcon(node.Name, false)
+			prefix = icon + " "
 		}
-		
+
 		displayName := indent + prefix + node.Name
 		if lipgloss.Width(displayName) > innerWidth-2 {
-			displayName = displayName[:innerWidth-5] + "..."
+			trunc := ""
+			w := 0
+			for _, r := range displayName {
+				rw := lipgloss.Width(string(r))
+				if w+rw > innerWidth-3 {
+					trunc += "…"
+					break
+				}
+				w += rw
+				trunc += string(r)
+			}
+			displayName = trunc
 		}
-		
-		style := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Text))
+
+		style := lipgloss.NewStyle()
 		if i == cursor && active {
-			style = style.Background(lipgloss.Color(theme.Accent)).Foreground(lipgloss.Color(theme.Background))
+			style = style.Background(lipgloss.Color(theme.Accent)).Foreground(lipgloss.Color(theme.Background)).Bold(true)
 		} else if node.IsDir {
-			style = style.Foreground(lipgloss.Color(theme.AccentAlt))
+			style = style.Foreground(lipgloss.Color(theme.AccentAlt)).Bold(true)
+		} else {
+			style = style.Foreground(lipgloss.Color(theme.Text))
 		}
-		
-		line := displayName
-		lines = append(lines, style.Render(line+strings.Repeat(" ", innerWidth-lipgloss.Width(line))))
+
+		line := style.Render(displayName + strings.Repeat(" ", innerWidth-lipgloss.Width(displayName)))
+		lines = append(lines, line)
 	}
-	
+
 	for len(lines) < innerHeight {
 		lines = append(lines, strings.Repeat(" ", innerWidth))
 	}
-	
+
 	return renderPanel("Files", width, height, active, theme, strings.Join(lines, "\n"))
 }
 
@@ -1696,10 +2249,12 @@ func renderTerminal(width, height int, active bool, theme Theme, content string,
 	outputHeight := availHeight - 1
 	rawLines := strings.Split(content, "\n")
 
+
 	var lines []string
 	if len(rawLines) > outputHeight {
 		rawLines = rawLines[len(rawLines)-outputHeight:]
 	}
+
 
 	for _, line := range rawLines {
 		if lipgloss.Width(line) > innerWidth {
@@ -1730,10 +2285,6 @@ func renderTerminal(width, height int, active bool, theme Theme, content string,
 	full := agentBar + "\n" + separator + "\n" + strings.Join(lines, "\n") + "\n" + inputLine
 	return renderPanel("Terminal", width, height, active, theme, full)
 }
-
-// ==============================================================================
-// AI Terminal Render
-// ==============================================================================
 
 func renderAITerminal(width, height int, active bool, theme Theme, content string, input string, cursorVisible bool, agentName string) string {
 	innerWidth := width - 2
@@ -1957,8 +2508,7 @@ func (m model) View() string {
 
 	// --- ZEN MODE ---
 	if m.zenMode {
-		content := m.textarea.Value()
-		editorView := renderEditorView(content, m.currentLang, t, m.cursorLine, m.cursorCol, m.width, m.height-1, m.cursorVisible, true)
+		editorView := renderEditorView(&m.editor, m.currentLang, t, m.width, m.height-1, m.cursorVisible)
 		hint := lipgloss.NewStyle().Foreground(lipgloss.Color(t.TextMuted)).Render(" ctrl+\\ exit zen ")
 		return editorView + "\n" + strings.Repeat(" ", m.width-lipgloss.Width(hint)) + hint
 	}
@@ -1975,24 +2525,68 @@ func (m model) View() string {
 	if mainH < 0 { mainH = 0 }
 
 	// --- 1. HEADER ---
+	// Logo with gradient-like coloring
 	logoStyle := func(color string) lipgloss.Style {
-		return lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true).Background(lipgloss.Color(t.SurfaceAlt))
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true).Background(lipgloss.Color(t.Background))
 	}
-	logo := lipgloss.JoinHorizontal(lipgloss.Left, 
-		logoStyle(t.Accent).Render(" T "), 
-		logoStyle(t.AccentAlt).Render(" R "), 
-		logoStyle(t.AccentAlt).Render(" I "), 
-		logoStyle(t.Accent).Render(" X "))
-	
-	sep := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Background(lipgloss.Color(t.SurfaceAlt)).Render(" │ ")
-	layoutLabel := []string{"CLASSIC", "AI DEV", "FOCUS", "TERM FOCUS"}[m.layoutMode]
-	headerInfo := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)).Background(lipgloss.Color(t.SurfaceAlt)).Render(" " + layoutLabel + " ")
-	folder := lipgloss.NewStyle().Foreground(lipgloss.Color(t.AccentAlt)).Background(lipgloss.Color(t.SurfaceAlt)).
-		Width(m.width - lipgloss.Width(logo) - lipgloss.Width(sep) - lipgloss.Width(headerInfo) - 4).Align(lipgloss.Center).Render(strings.ToUpper(m.currentFolder))
-	
-	headerContent := lipgloss.NewStyle().Width(m.width).Background(lipgloss.Color(t.SurfaceAlt)).
-		Render(lipgloss.JoinHorizontal(lipgloss.Left, logo, sep, folder, sep, headerInfo))
-	
+	logo := lipgloss.NewStyle().Background(lipgloss.Color(t.Background)).
+		Render(lipgloss.JoinHorizontal(lipgloss.Left,
+			logoStyle(t.Accent).Render(" T "),
+			logoStyle(t.AccentAlt).Render(" R "),
+			logoStyle(t.AccentAlt).Render(" I "),
+			logoStyle(t.Accent).Render(" X ")))
+
+	// Active panel indicator
+	panelNames := map[string]string{"files": "FILES", "editor": "EDITOR", "terminal": "TERM"}
+	panelLabel := panelNames[m.active]
+	if m.layoutMode == 2 {
+		panelLabel = "EDITOR"
+	} else if (m.layoutMode == 1 || m.layoutMode == 3) && m.active == "terminal" {
+		panelLabel = "AI TERM"
+	}
+	activePanel := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(t.Background)).
+		Background(lipgloss.Color(t.Accent)).
+		Bold(true).
+		Padding(0, 1).
+		Render(" " + panelLabel + " ")
+
+	// Layout mode badge
+	layoutLabels := []string{"CLASSIC", "AI DEV", "FOCUS", "TERM FOCUS"}
+	layoutBadge := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(t.TextMuted)).
+		Background(lipgloss.Color(t.Background)).
+		Render(" " + layoutLabels[m.layoutMode] + " ")
+
+	// Folder name
+	folder := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(t.AccentAlt)).
+		Background(lipgloss.Color(t.Background)).
+		Align(lipgloss.Center).
+		Width(max(0, m.width-lipgloss.Width(logo)-lipgloss.Width(activePanel)-lipgloss.Width(layoutBadge)-24)).
+		Render(" " + strings.ToUpper(m.currentFolder) + " ")
+
+	// Git info in header
+	gitInfo := ""
+	if m.gitBranch != "" {
+		gitStyle := lipgloss.NewStyle().Background(lipgloss.Color(t.Background))
+		dirtyMark := ""
+		if m.gitDirty {
+			dirtyMark = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Warning)).Background(lipgloss.Color(t.Background)).Render("●")
+		}
+		gitInfo = gitStyle.Foreground(lipgloss.Color(t.TextMuted)).Render(" " + m.gitBranch + " " + dirtyMark + " ")
+	} else {
+		gitInfo = lipgloss.NewStyle().Background(lipgloss.Color(t.Background)).Render("")
+	}
+
+	headerContent := lipgloss.NewStyle().Width(m.width).Background(lipgloss.Color(t.Background)).
+		Render(lipgloss.JoinHorizontal(lipgloss.Left,
+			logo, activePanel, gitInfo,
+			folder,
+			lipgloss.NewStyle().Width(2).Background(lipgloss.Color(t.Background)).Render(""),
+			layoutBadge,
+		))
+
 	headerSep := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Width(m.width).Render(strings.Repeat("─", m.width))
 	header := lipgloss.JoinVertical(lipgloss.Left, headerContent, headerSep)
 
@@ -2080,8 +2674,8 @@ func (m model) View() string {
 		editorW := (m.width * 60) / 100
 		aiTermW := m.width - editorW - gap
 
-		editorContent := m.textarea.Value()
-		editorView := renderEditorView(editorContent, m.currentLang, t, m.cursorLine, m.cursorCol, editorW-2, mainH-2, m.cursorVisible, m.active == "editor")
+		
+		editorView := renderEditorView(&m.editor, m.currentLang, t, editorW-2, mainH-2, m.cursorVisible)
 		if m.searchOpen {
 			matchInfo := ""
 			if len(m.searchMatches) > 0 {
@@ -2094,7 +2688,7 @@ func (m model) View() string {
 				Render(fmt.Sprintf(" Search: %s%s    [Enter] next  [Esc] close", m.searchQuery, matchInfo))
 			editorView = searchBar + "\n" + editorView
 		}
-		editorPanel := renderPanel("Editor", editorW, mainH, m.active == "editor", t, editorView)
+		editorPanel := renderPanel(m.editor.editorTitle(), editorW, mainH, m.active == "editor", t, editorView)
 		divStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Width(gap).Render("│")
 		aiTermPanel := renderAITerminal(aiTermW, mainH, m.active == "terminal", t, m.aiTerminalBuf.String(), m.aiTerminalInput, m.cursorVisible, m.aiAgentName)
 		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, editorPanel, divStyle, aiTermPanel)
@@ -2117,7 +2711,7 @@ func (m model) View() string {
 				Render(fmt.Sprintf(" Search: %s%s    [Enter] next  [Esc] close", m.searchQuery, matchInfo))
 			editorView = searchBar + "\n" + editorView
 		}
-		mainArea = renderPanel("Editor", m.width, mainH, true, t, editorView)
+		mainArea = renderPanel(m.editor.editorTitle(), m.width, mainH, true, t, editorView)
 
 	case 3: // Terminal Focus: Editor (40%) | AI Terminal (60%)
 		m.fileTreeVisible = false
@@ -2126,8 +2720,8 @@ func (m model) View() string {
 		editorW := (m.width * 40) / 100
 		aiTermW := m.width - editorW - gap
 
-		editorContent := m.textarea.Value()
-		editorView := renderEditorView(editorContent, m.currentLang, t, m.cursorLine, m.cursorCol, editorW-2, mainH-2, m.cursorVisible, m.active == "editor")
+		
+		editorView := renderEditorView(&m.editor, m.currentLang, t, editorW-2, mainH-2, m.cursorVisible)
 		if m.searchOpen {
 			matchInfo := ""
 			if len(m.searchMatches) > 0 {
@@ -2140,7 +2734,7 @@ func (m model) View() string {
 				Render(fmt.Sprintf(" Search: %s%s    [Enter] next  [Esc] close", m.searchQuery, matchInfo))
 			editorView = searchBar + "\n" + editorView
 		}
-		editorPanel := renderPanel("Editor", editorW, mainH, m.active == "editor", t, editorView)
+		editorPanel := renderPanel(m.editor.editorTitle(), editorW, mainH, m.active == "editor", t, editorView)
 		divStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Width(gap).Render("│")
 		aiTermPanel := renderAITerminal(aiTermW, mainH, m.active == "terminal", t, m.aiTerminalBuf.String(), m.aiTerminalInput, m.cursorVisible, m.aiAgentName)
 		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, editorPanel, divStyle, aiTermPanel)
@@ -2167,64 +2761,79 @@ func (m model) View() string {
 	fileInfo := ""
 	if m.currentPath != "" {
 		fname := filepath.Base(m.currentPath)
-		if m.hasChanges {
-			fname += " *"
-			fileInfo = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Warning)).Background(lipgloss.Color(t.SurfaceAlt)).Render(" " + fname + " ")
+		if m.editor.modified {
+			fname += " •"
+			fileInfo = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Warning)).Background(lipgloss.Color(t.Background)).Render(" " + fname + " ")
 		} else {
-			fileInfo = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text)).Background(lipgloss.Color(t.SurfaceAlt)).Render(" " + fname + " ")
+			fileInfo = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text)).Background(lipgloss.Color(t.Background)).Render(" " + fname + " ")
 		}
 	}
-	
+
 	// Git info
-	gitInfo := ""
+	gitInfo = ""
 	if m.gitBranch != "" {
 		gitDirtyMark := ""
 		if m.gitDirty {
-			gitDirtyMark = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Warning)).Background(lipgloss.Color(t.SurfaceAlt)).Render("●")
+			gitDirtyMark = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Warning)).Background(lipgloss.Color(t.Background)).Render("●")
 		}
-		gitInfo = lipgloss.NewStyle().Foreground(lipgloss.Color(t.TextMuted)).Background(lipgloss.Color(t.SurfaceAlt)).Render(fmt.Sprintf(" %s %s ", m.gitBranch, gitDirtyMark))
+		gitInfo = lipgloss.NewStyle().Foreground(lipgloss.Color(t.TextMuted)).Background(lipgloss.Color(t.Background)).Render(fmt.Sprintf(" %s %s", m.gitBranch, gitDirtyMark))
 	}
-	
+
 	// Language
-	langInfo := lipgloss.NewStyle().Foreground(lipgloss.Color(t.TextMuted)).Background(lipgloss.Color(t.SurfaceAlt)).Render(" " + m.currentLang + " ")
-	
+	langInfo := lipgloss.NewStyle().Foreground(lipgloss.Color(t.TextMuted)).Background(lipgloss.Color(t.Background)).Render(" " + m.currentLang + " ")
+
+	// Cursor position
+	cursorInfo := ""
+	if m.active == "editor" && m.currentPath != "" {
+		cursorInfo = lipgloss.NewStyle().Foreground(lipgloss.Color(t.TextMuted)).Background(lipgloss.Color(t.Background)).Render(fmt.Sprintf(" Ln %d, Col %d ", m.editor.cursorRow+1, m.editor.cursorCol+1))
+	}
+
+	// Active AI agent indicator
+	agentInfo := ""
+	if m.aiAgentName != "" && (m.layoutMode == 1 || m.layoutMode == 3) {
+		animIndicator := ""
+		if m.aiAgentAnimTick {
+			animIndicator = " ●"
+		}
+		agentInfo = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Success)).Background(lipgloss.Color(t.Background)).Render(" Agent:" + m.aiAgentName + animIndicator + " ")
+	}
+
 	// Right: status message
 	var statusRight string
 	if m.isError {
-		statusRight = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Error)).Background(lipgloss.Color(t.SurfaceAlt)).Render(" " + m.statusMsg + "  ")
+		statusRight = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Error)).Bold(true).Background(lipgloss.Color(t.Background)).Render(" " + m.statusMsg + "  ")
 	} else if m.statusMsg != "" {
-		statusRight = lipgloss.NewStyle().Foreground(lipgloss.Color(t.TextMuted)).Background(lipgloss.Color(t.SurfaceAlt)).Render(" " + m.statusMsg + "  ")
+		statusRight = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)).Background(lipgloss.Color(t.Background)).Render(" " + m.statusMsg + "  ")
 	}
-	
+
 	// Right: keyboard hints
 	var pills string
 	if m.layoutMode == 0 {
-		pills = lipgloss.NewStyle().Background(lipgloss.Color(t.Surface)).Foreground(lipgloss.Color(t.Accent)).Padding(0, 1).Render("^1 Files  ^2 Editor  ^3 Term  ^S Save  ^Q Quit")
+		pills = lipgloss.NewStyle().Background(lipgloss.Color(t.SurfaceAlt)).Foreground(lipgloss.Color(t.TextMuted)).Padding(0, 1).Render("^1 Files  ^2 Editor  ^3 Term  ^S Save  ^Q Quit")
 	} else if m.layoutMode == 1 || m.layoutMode == 3 {
-		pills = lipgloss.NewStyle().Background(lipgloss.Color(t.Surface)).Foreground(lipgloss.Color(t.Accent)).Padding(0, 1).Render("Alt+Enter File  Alt+F Full  Alt+1-5 Agents  ^L Layout")
+		pills = lipgloss.NewStyle().Background(lipgloss.Color(t.SurfaceAlt)).Foreground(lipgloss.Color(t.TextMuted)).Padding(0, 1).Render("Alt+Enter  Alt+F  Alt+1-5  ^L Layout")
 	} else {
-		pills = lipgloss.NewStyle().Background(lipgloss.Color(t.Surface)).Foreground(lipgloss.Color(t.Accent)).Padding(0, 1).Render("^2 Editor  ^L  Layout  ^S Save  ^Q Quit")
+		pills = lipgloss.NewStyle().Background(lipgloss.Color(t.SurfaceAlt)).Foreground(lipgloss.Color(t.TextMuted)).Padding(0, 1).Render("^2 Editor  ^L Layout  ^S Save  ^Q Quit")
 	}
-	
-	leftWidth := lipgloss.Width(statusBrand) + lipgloss.Width(layoutInfo) + lipgloss.Width(agentInfo) + lipgloss.Width(fileInfo) + lipgloss.Width(gitInfo) + lipgloss.Width(langInfo)
+
+	leftWidth := lipgloss.Width(statusBrand) + lipgloss.Width(fileInfo) + lipgloss.Width(gitInfo) + lipgloss.Width(langInfo) + lipgloss.Width(cursorInfo) + lipgloss.Width(agentInfo)
 	rightWidth := lipgloss.Width(statusRight) + lipgloss.Width(pills) + 4
 	statusCenter := m.width - leftWidth - rightWidth
 	if statusCenter < 2 { statusCenter = 2 }
-	
-	leftContent := statusBrand + layoutInfo + agentInfo + fileInfo + gitInfo + langInfo
-	
-	footerContent := lipgloss.NewStyle().Width(m.width).Background(lipgloss.Color(t.SurfaceAlt)).
+
+	leftContent := statusBrand + fileInfo + gitInfo + langInfo + cursorInfo + agentInfo
+
+	footerContent := lipgloss.NewStyle().Width(m.width).Background(lipgloss.Color(t.Background)).
 		Render(lipgloss.JoinHorizontal(lipgloss.Left,
 			leftContent,
-			lipgloss.NewStyle().Width(statusCenter).Background(lipgloss.Color(t.SurfaceAlt)).Render(""),
+			lipgloss.NewStyle().Width(statusCenter).Background(lipgloss.Color(t.Background)).Render(""),
 			statusRight,
 			pills,
 		))
-	
+
 	footerSep := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Width(m.width).Render(strings.Repeat("─", m.width))
 	footer := lipgloss.JoinVertical(lipgloss.Left, footerSep, footerContent)
 
-	finalView := lipgloss.JoinVertical(lipgloss.Left, header, mainArea, footer)
 
 	// Overlays
 	if m.overlayMode != "" {
@@ -2238,6 +2847,8 @@ func (m model) View() string {
 	if m.globalSearchOpen {
 		return renderGlobalSearch(m.width, t, m.globalSearchQuery, m.globalSearchResults, m.globalSearchIdx)
 	}
+
+	finalView := lipgloss.JoinVertical(lipgloss.Left, header, mainArea, footer)
 
 	return finalView
 }
@@ -2610,55 +3221,132 @@ func stripANSI(s string) string {
 	return result.String()
 }
 
-// renderEditorView renders the editor content with syntax highlighting,
-// line numbers, and cursor position.
-func renderEditorView(content string, lang string, theme Theme, cursorLine, cursorCol int, width, height int, cursorVisible bool, active bool) string {
-	lines := strings.Split(content, "\n")
-	innerWidth := width - 6 // room for line numbers + gutter
-	innerHeight := height
+// handleEditorKey handles all keyboard events when the editor panel is active.
+func (m *model) handleEditorKey(key string) {
+	switch key {
+	// --- Text input ---
+	case "enter":
+		m.editor.insertNewline()
+	case "tab":
+		m.editor.insertTab()
+	case "backspace":
+		m.editor.backspace()
+	case "delete":
+		m.editor.deleteChar()
 
-	var result strings.Builder
+	// --- Cursor movement ---
+	case "left":
+		m.editor.moveLeft()
+	case "right":
+		m.editor.moveRight()
+	case "up":
+		m.editor.moveUp()
+	case "down":
+		m.editor.moveDown()
+	case "home":
+		m.editor.moveHome()
+	case "end":
+		m.editor.moveEnd()
+	case "ctrl+left":
+		m.editor.moveWordLeft()
+	case "ctrl+right":
+		m.editor.moveWordRight()
+	case "ctrl+home":
+		m.editor.moveToFirstLine()
+	case "ctrl+end":
+		m.editor.moveToLastLine()
 
-	// Line number width
+	// --- Selection ---
+	case "shift+left":
+		m.editor.selectLeft()
+	case "shift+right":
+		m.editor.selectRight()
+	case "shift+up":
+		m.editor.selectUp()
+	case "shift+down":
+		m.editor.selectDown()
+	case "shift+home":
+		m.editor.selectHome()
+	case "shift+end":
+		m.editor.selectEnd()
+	case "ctrl+a":
+		m.editor.selectAll()
+
+	// --- Clipboard ---
+	case "ctrl+c":
+		text := m.editor.copySelection()
+		if text != "" {
+			clipboard.WriteAll(text)
+		}
+	case "ctrl+x":
+		text := m.editor.cutSelection()
+		if text != "" {
+			clipboard.WriteAll(text)
+		}
+	case "ctrl+v":
+		text, err := clipboard.ReadAll()
+		if err == nil && text != "" {
+			m.editor.clipText = text
+			m.editor.pasteClipboard()
+		}
+
+	// --- Undo/Redo ---
+	case "ctrl+z":
+		m.editor.undo()
+	case "ctrl+y":
+		m.editor.redo()
+
+	// --- Escape: clear selection ---
+	case "esc":
+		m.editor.clearSelection()
+
+	// --- Printable characters ---
+	default:
+		if len(key) == 1 {
+			m.editor.insertAtCursor(key)
+		}
+	}
+}
+
+// renderEditorView renders the editor with syntax highlighting, virtual scrolling,
+// line numbers, selection highlights, and cursor.
+func renderEditorView(e *EditorState, lang string, theme Theme, width, height int, cursorVisible bool) string {
+	if height <= 0 {
+		height = 1
+	}
+	if width < 6 {
+		width = 6
+	}
+	e.adjustScroll(height)
+
 	lineNumWidth := 3
-	if len(lines) >= 100 {
+	if len(e.lines) >= 100 {
 		lineNumWidth = 4
 	}
-	if len(lines) >= 1000 {
+	if len(e.lines) >= 1000 {
 		lineNumWidth = 5
 	}
 
-	// Highlight if language is known
-	highlighted := highlightContent(content, lang, theme)
+	innerWidth := width - lineNumWidth - 2 // mark + separator
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
 
-	for i := 0; i < innerHeight; i++ {
-		if i >= len(lines) {
-			// Empty line past EOF
-			lineNum := lipgloss.NewStyle().
-				Foreground(lipgloss.Color(theme.LineNumber)).
-				Width(lineNumWidth).
-				Align(lipgloss.Right).
-				Render("~")
-			result.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(theme.LineNumber)).Render("  "))
-			result.WriteString(lineNum)
-			result.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(theme.LineNumber)).Render(" │ "))
-			if i == cursorLine && active && cursorVisible {
-				result.WriteString("█" + strings.Repeat(" ", innerWidth-1))
-			} else {
-				result.WriteString(strings.Repeat(" ", innerWidth))
-			}
-			if i < innerHeight-1 {
-				result.WriteString("\n")
-			}
-			continue
+	scrollTop := e.scrollTop
+	var result strings.Builder
+
+	for i := 0; i < height; i++ {
+		lineIdx := scrollTop + i
+		isCursorLine := lineIdx == e.cursorRow
+
+		// --- Line number ---
+		var lineNumStr string
+		if lineIdx < len(e.lines) {
+			lineNumStr = fmt.Sprintf("%d", lineIdx+1)
+		} else {
+			lineNumStr = "~"
 		}
-
-		// Current line indicator + line number
-		isCursorLine := i == cursorLine && active
-		lineNumStr := fmt.Sprintf("%d", i+1)
-		lineNumStyle := lipgloss.NewStyle().
-			Width(lineNumWidth).
-			Align(lipgloss.Right)
+		lineNumStyle := lipgloss.NewStyle().Width(lineNumWidth).Align(lipgloss.Right)
 		if isCursorLine {
 			lineNumStyle = lineNumStyle.
 				Foreground(lipgloss.Color(theme.Accent)).
@@ -2668,76 +3356,165 @@ func renderEditorView(content string, lang string, theme Theme, cursorLine, curs
 				Foreground(lipgloss.Color(theme.LineNumber))
 		}
 
-		// Gutter mark
-		gutterMark := " "
+		// --- Gutter ---
 		if isCursorLine {
-			gutterMark = "▎"
-			gutterMark = lipgloss.NewStyle().
+			result.WriteString(lipgloss.NewStyle().
 				Foreground(lipgloss.Color(theme.Accent)).
 				Background(lipgloss.Color(theme.CursorLine)).
-				Render(gutterMark)
+				Render("\u258e"))
 		} else {
-			gutterMark = lipgloss.NewStyle().
+			result.WriteString(lipgloss.NewStyle().
 				Foreground(lipgloss.Color(theme.LineNumber)).
-				Render(" ")
+				Render(" "))
 		}
-
-		gutterSep := lipgloss.NewStyle().
-			Foreground(lipgloss.Color(theme.LineNumber)).
-			Render("│")
-
+		result.WriteString(lineNumStyle.Render(lineNumStr))
 		if isCursorLine {
-			gutterSep = lipgloss.NewStyle().
+			result.WriteString(lipgloss.NewStyle().
 				Foreground(lipgloss.Color(theme.LineNumber)).
 				Background(lipgloss.Color(theme.CursorLine)).
-				Render(gutterSep)
+				Render("\u2502"))
+		} else {
+			result.WriteString(lipgloss.NewStyle().
+				Foreground(lipgloss.Color(theme.LineNumber)).
+				Render("\u2502"))
 		}
 
-		result.WriteString(gutterMark)
-		result.WriteString(lineNumStyle.Render(lineNumStr))
-		result.WriteString(gutterSep)
-
-		// Line content
-		line := highlighted[i]
-		lineWidth := lipgloss.Width(line)
-		if lineWidth > innerWidth {
-			// Truncate line to fit — strip ANSI first so escape codes aren't counted as visible chars
-			plainLine := stripANSI(line)
-			truncated := ""
-			w := 0
-			for _, r := range plainLine {
-				rw := lipgloss.Width(string(r))
-				if w+rw > innerWidth-3 {
-					truncated += "..."
-					break
+		// --- Line content ---
+		if lineIdx >= len(e.lines) {
+			if isCursorLine && cursorVisible {
+				pad := strings.Repeat(" ", innerWidth-1)
+				if padNeeded := innerWidth - 1; padNeeded < 0 {
+					pad = ""
 				}
-				w += rw
-				truncated += string(r)
-			}
-			// Re-highlight the truncated plain text
-			truncated = highlightLine(truncated, lang, theme)
-			if isCursorLine {
-				result.WriteString(lipgloss.NewStyle().Background(lipgloss.Color(theme.CursorLine)).Render(truncated))
+				result.WriteString(lipgloss.NewStyle().
+					Background(lipgloss.Color(theme.CursorLine)).
+					Render("\u2588" + pad))
 			} else {
-				result.WriteString(truncated)
+				result.WriteString(strings.Repeat(" ", innerWidth))
 			}
 		} else {
-			padding := strings.Repeat(" ", innerWidth-lineWidth)
-			if isCursorLine {
-				result.WriteString(lipgloss.NewStyle().Background(lipgloss.Color(theme.CursorLine)).Render(line + padding))
-			} else {
-				result.WriteString(line + padding)
-			}
-		}
+			line := e.lines[lineIdx]
 
-		if i < innerHeight-1 {
-			result.WriteString("\n")
+			// Selection range
+			selStartRow, selStartCol, selEndRow, selEndCol := -1, -1, -1, -1
+			if e.hasSelection() {
+				selStartRow, selStartCol, selEndRow, selEndCol = e.selRange()
+			}
+
+			// Determine selection segment on this line
+			hasSelPart := false
+			selPartStart, selPartEnd := 0, 0
+			if selStartRow != -1 && lineIdx >= selStartRow && lineIdx <= selEndRow {
+				if lineIdx == selStartRow && lineIdx == selEndRow {
+					selPartStart, selPartEnd = selStartCol, selEndCol
+					hasSelPart = true
+				} else if lineIdx == selStartRow {
+					selPartStart, selPartEnd = selStartCol, len(line)
+					hasSelPart = true
+				} else if lineIdx == selEndRow {
+					selPartStart, selPartEnd = 0, selEndCol
+					hasSelPart = true
+				} else if lineIdx > selStartRow && lineIdx < selEndRow {
+					selPartStart, selPartEnd = 0, len(line)
+					hasSelPart = true
+				}
+			}
+
+			// Split line into parts
+			beforeSel, selPart, afterSel := line, "", ""
+			if hasSelPart {
+				beforeSel = line[:selPartStart]
+				selPart = line[selPartStart:selPartEnd]
+				afterSel = line[selPartEnd:]
+			}
+
+			beforeHL := highlightLine(beforeSel, lang, theme)
+			selHL := ""
+			if hasSelPart {
+				selHL = highlightLine(selPart, lang, theme)
+			}
+			afterHL := highlightLine(afterSel, lang, theme)
+
+			totalW := lipgloss.Width(stripANSI(beforeHL)) + lipgloss.Width(stripANSI(selHL)) + lipgloss.Width(stripANSI(afterHL))
+
+			if totalW > innerWidth {
+				// Truncate line
+				plainText := beforeSel + selPart + afterSel
+				truncated := ""
+				w := 0
+				for _, r := range plainText {
+					rw := lipgloss.Width(string(r))
+					if w+rw > innerWidth-3 {
+						truncated += "..."
+						break
+					}
+					w += rw
+					truncated += string(r)
+				}
+				result.WriteString(highlightLine(truncated, lang, theme))
+			} else if isCursorLine && !e.hasSelection() {
+				// Cursor line: render with block cursor at cursorCol
+				col := e.cursorCol
+				bCursor, atCursor, aCursor := line, " ", ""
+				if col < len(line) {
+					bCursor = line[:col]
+					atCursor = string(line[col])
+					aCursor = line[col+1:]
+				}
+				bHL := highlightLine(bCursor, lang, theme)
+				aHL := highlightLine(aCursor, lang, theme)
+				bW := lipgloss.Width(stripANSI(bHL))
+				aW := lipgloss.Width(stripANSI(aHL))
+
+				result.WriteString(lipgloss.NewStyle().Background(lipgloss.Color(theme.CursorLine)).Render(bHL))
+
+				cursorStyle := lipgloss.NewStyle().
+					Background(lipgloss.Color(theme.Accent)).
+					Foreground(lipgloss.Color(theme.Background))
+				if !cursorVisible {
+					cursorStyle = lipgloss.NewStyle().
+						Background(lipgloss.Color(theme.CursorLine)).
+						Foreground(lipgloss.Color(theme.TextMuted))
+				}
+				result.WriteString(cursorStyle.Render(atCursor))
+
+				padNeeded := innerWidth - bW - 1 - aW
+				if padNeeded < 0 {
+					padNeeded = 0
+				}
+				result.WriteString(lipgloss.NewStyle().Background(lipgloss.Color(theme.CursorLine)).Render(aHL + strings.Repeat(" ", padNeeded)))
+			} else {
+				// Normal or selection rendering
+				if hasSelPart {
+					result.WriteString(beforeHL)
+					result.WriteString(lipgloss.NewStyle().Background(lipgloss.Color(theme.Selection)).Render(selHL))
+					result.WriteString(afterHL)
+					padNeeded := innerWidth - totalW
+					if padNeeded > 0 {
+						if isCursorLine {
+							result.WriteString(lipgloss.NewStyle().Background(lipgloss.Color(theme.CursorLine)).Render(strings.Repeat(" ", padNeeded)))
+						} else {
+							result.WriteString(strings.Repeat(" ", padNeeded))
+						}
+					}
+				} else if isCursorLine {
+					fullLine := beforeHL + afterHL
+					padNeeded := innerWidth - totalW
+					if padNeeded < 0 { padNeeded = 0 }
+					result.WriteString(lipgloss.NewStyle().Background(lipgloss.Color(theme.CursorLine)).Render(fullLine + strings.Repeat(" ", padNeeded)))
+				} else {
+					result.WriteString(beforeHL + afterHL)
+					padNeeded := innerWidth - totalW
+					if padNeeded > 0 {
+						result.WriteString(strings.Repeat(" ", padNeeded))
+					}
+				}
+			}
 		}
 	}
 
 	return result.String()
 }
-
 // ==============================================================================
 // Language Detection
 // ==============================================================================
