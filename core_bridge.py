@@ -8,6 +8,45 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import subprocess
 from pathlib import Path
+import threading
+
+# --- Event sending ---
+_send_lock = threading.Lock()
+
+def send_event(event_type: str, data: dict):
+    """Send an async event to the Go frontend."""
+    msg = json.dumps({"event": event_type, "data": data})
+    with _send_lock:
+        sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
+
+# --- Persistent Shell ---
+_shell_process = None
+
+def start_terminal(params):
+    """Start a persistent shell process."""
+    global _shell_process
+    if _shell_process:
+        _shell_process.stop()
+    _shell_process = shell.PersistentShell(send_event)
+    return {"status": "ok", "message": "Terminal started"}
+
+def terminal_write(params):
+    """Write data to the running shell process."""
+    global _shell_process
+    if not _shell_process:
+        return {"status": "error", "message": "No terminal running"}
+    _shell_process.write(params.get("data", ""))
+    return {"status": "ok"}
+
+def stop_terminal(params):
+    """Stop the persistent shell process."""
+    global _shell_process
+    if _shell_process:
+        _shell_process.stop()
+        _shell_process = None
+    return {"status": "ok"}
+
 
 HANDLERS = {
     "list_dir":    lambda r: files.list_dir(r.get("path", ".")),
@@ -25,6 +64,9 @@ HANDLERS = {
     "run_command": lambda r: shell.run_command(r.get("command"), r.get("cwd")),
     "get_git_branch": lambda r: get_git_branch(r.get("path", ".")),
     "search_files":   lambda r: search_files(r.get("root", "."), r.get("query", "")),
+    "start_terminal": lambda r: start_terminal(r),
+    "terminal_write": lambda r: terminal_write(r),
+    "stop_terminal":  lambda r: stop_terminal(r),
 }
 
 

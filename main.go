@@ -303,6 +303,26 @@ func runCommand(b *Bridge, command string, isAICmd bool) tea.Cmd {
 	}
 }
 
+func terminalWrite(b *Bridge, data string) tea.Cmd {
+	return func() tea.Msg {
+		_, err := b.Call("terminal_write", map[string]interface{}{"data": data})
+		if err != nil {
+			return runCommandMsg{Error: err.Error()}
+		}
+		return nil
+	}
+}
+
+func startTerminalCmd(b *Bridge) tea.Cmd {
+	return func() tea.Msg {
+		_, err := b.Call("start_terminal", nil)
+		if err != nil {
+			return runCommandMsg{Error: err.Error()}
+		}
+		return nil
+	}
+}
+
 func waitForEvent(b *Bridge) tea.Cmd {
 	return func() tea.Msg {
 		return <-b.Events()
@@ -555,6 +575,7 @@ func (m model) Init() tea.Cmd {
 		waitForEvent(m.bridge),
 		listDir(m.bridge, cwd),
 		fetchGitBranch(m.bridge, cwd),
+		startTerminalCmd(m.bridge),
 	)
 }
 
@@ -650,6 +671,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Data string `json:"data"`
 			}
 			json.Unmarshal(msg.Data, &data)
+			// Write to both terminal buffers so streaming shows everywhere
+			m.terminalBuf.WriteString(data.Data)
 			m.aiTerminalBuf.WriteString(data.Data)
 		}
 		return m, waitForEvent(m.bridge)
@@ -1217,8 +1240,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, cmd
 					} else {
 						m.terminalHistory = history
+						// Show the command prompt in the buffer
 						m.terminalBuf.WriteString("\n> " + input + "\n")
-						cmd := runCommand(m.bridge, input, false)
+						// Send to persistent shell via streaming terminal_write
+						cmd := terminalWrite(m.bridge, input+"\n")
 						m.terminalInput = ""
 						m.terminalHistIdx = -1
 						return m, cmd
@@ -1270,8 +1295,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.terminalInput = m.terminalInput[:len(m.terminalInput)-1]
 					}
 				}
-			case "ctrl+k":
+			case "ctrl+c":
+				if !isAITerminal {
+					// Send Ctrl+C to streaming terminal
+					m.terminalBuf.WriteString("^C\n")
+					return m, terminalWrite(m.bridge, "\x03")
+				}
+			case "ctrl+l":
 				buf.Reset()
+				if isAITerminal {
+					// For AI terminal, also reset the buffer on the remote side
+				}
+				return m, nil
 			default:
 				if len(msg.String()) == 1 {
 					if isAITerminal {
