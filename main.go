@@ -2124,6 +2124,97 @@ var jsBuiltins = map[string]bool{
 	"setTimeout": true, "setInterval": true, "fetch": true,
 }
 
+var rsKeywords = map[string]bool{
+	"as": true, "async": true, "await": true, "break": true, "const": true,
+	"continue": true, "crate": true, "dyn": true, "else": true, "enum": true,
+	"extern": true, "false": true, "fn": true, "for": true, "if": true,
+	"impl": true, "in": true, "let": true, "loop": true, "match": true,
+	"mod": true, "move": true, "mut": true, "pub": true, "ref": true,
+	"return": true, "self": true, "static": true, "struct": true, "super": true,
+	"trait": true, "true": true, "type": true, "unsafe": true, "use": true,
+	"where": true, "while": true, "yield": true,
+}
+
+var rsBuiltins = map[string]bool{
+	"i8": true, "i16": true, "i32": true, "i64": true, "i128": true,
+	"u8": true, "u16": true, "u32": true, "u64": true, "u128": true,
+	"f32": true, "f64": true, "bool": true, "char": true, "str": true,
+	"String": true, "Vec": true, "Option": true, "Result": true,
+	"Box": true, "Rc": true, "Arc": true, "HashMap": true, "HashSet": true,
+	"Some": true, "None": true, "Ok": true, "Err": true,
+	"println": true, "format": true, "dbg": true, "eprintln": true,
+}
+
+var javaKeywords = map[string]bool{
+	"abstract": true, "assert": true, "boolean": true, "break": true, "byte": true,
+	"case": true, "catch": true, "char": true, "class": true, "const": true,
+	"continue": true, "default": true, "do": true, "double": true, "else": true,
+	"enum": true, "extends": true, "false": true, "final": true, "finally": true,
+	"float": true, "for": true, "if": true, "implements": true, "import": true,
+	"instanceof": true, "int": true, "interface": true, "long": true, "native": true,
+	"new": true, "null": true, "package": true, "private": true, "protected": true,
+	"public": true, "return": true, "short": true, "static": true, "strictfp": true,
+	"super": true, "switch": true, "synchronized": true, "this": true, "throw": true,
+	"throws": true, "transient": true, "true": true, "try": true, "void": true,
+	"volatile": true, "while": true, "var": true, "yield": true, "sealed": true,
+	"permits": true, "record": true,
+}
+
+var javaBuiltins = map[string]bool{
+	"String": true, "System": true, "Object": true, "Class": true,
+	"Integer": true, "Long": true, "Double": true, "Float": true, "Boolean": true,
+	"List": true, "ArrayList": true, "Map": true, "HashMap": true, "Set": true,
+	"HashSet": true, "Optional": true, "Stream": true, "Collection": true,
+	"Arrays": true, "Collections": true, "Math": true, "Exception": true,
+	"RuntimeException": true, "Error": true, "Thread": true,
+}
+
+var cppKeywords = map[string]bool{
+	"alignas": true, "alignof": true, "auto": true, "bool": true, "break": true,
+	"case": true, "catch": true, "char": true, "class": true, "const": true,
+	"constexpr": true, "continue": true, "decltype": true, "default": true,
+	"delete": true, "do": true, "double": true, "else": true, "enum": true,
+	"explicit": true, "export": true, "extern": true, "false": true, "float": true,
+	"for": true, "friend": true, "goto": true, "if": true, "inline": true,
+	"int": true, "long": true, "mutable": true, "namespace": true, "new": true,
+	"noexcept": true, "nullptr": true, "operator": true, "override": true,
+	"private": true, "protected": true, "public": true, "register": true,
+	"return": true, "short": true, "signed": true, "sizeof": true, "static": true,
+	"struct": true, "switch": true, "template": true, "this": true, "throw": true,
+	"true": true, "try": true, "typedef": true, "typename": true, "union": true,
+	"unsigned": true, "using": true, "virtual": true, "void": true, "volatile": true,
+	"while": true,
+}
+
+var cppBuiltins = map[string]bool{
+	"std": true, "string": true, "vector": true, "map": true, "set": true,
+	"cout": true, "cin": true, "endl": true, "shared_ptr": true, "unique_ptr": true,
+	"make_shared": true, "make_unique": true, "pair": true, "tuple": true,
+	"optional": true, "any": true, "variant": true, "array": true,
+	"printf": true, "fprintf": true, "sprintf": true, "malloc": true, "free": true,
+	"NULL": true, "size_t": true, "int32_t": true, "int64_t": true,
+}
+
+var rbKeywords = map[string]bool{
+	"BEGIN": true, "END": true, "alias": true, "and": true, "begin": true,
+	"break": true, "case": true, "class": true, "def": true, "defined?": true,
+	"do": true, "else": true, "elsif": true, "end": true, "ensure": true,
+	"false": true, "for": true, "if": true, "in": true, "module": true,
+	"next": true, "nil": true, "not": true, "or": true, "redo": true,
+	"rescue": true, "retry": true, "return": true, "self": true, "super": true,
+	"then": true, "true": true, "undef": true, "unless": true, "until": true,
+	"when": true, "while": true, "yield": true,
+}
+
+var rbBuiltins = map[string]bool{
+	"puts": true, "print": true, "p": true, "require": true, "include": true,
+	"extend": true, "attr_reader": true, "attr_writer": true, "attr_accessor": true,
+	"Array": true, "Hash": true, "String": true, "Integer": true, "Float": true,
+	"Symbol": true, "Object": true, "Class": true, "Module": true, "Enumerable": true,
+	"Proc": true, "lambda": true, "raise": true, "fail": true, "catch": true,
+	"throw": true, "loop": true, "sleep": true,
+}
+
 func getKeywordSet(lang string) (map[string]bool, map[string]bool) {
 	switch lang {
 	case "Go":
@@ -2132,6 +2223,14 @@ func getKeywordSet(lang string) (map[string]bool, map[string]bool) {
 		return pyKeywords, pyBuiltins
 	case "JavaScript", "TypeScript":
 		return jsKeywords, jsBuiltins
+	case "Rust":
+		return rsKeywords, rsBuiltins
+	case "Java":
+		return javaKeywords, javaBuiltins
+	case "C", "C++":
+		return cppKeywords, cppBuiltins
+	case "Ruby":
+		return rbKeywords, rbBuiltins
 	default:
 		return nil, nil
 	}
