@@ -120,7 +120,7 @@ func (b *Bridge) Call(method string, params interface{}) (json.RawMessage, error
 
 	resp := <-ch
 	if resp.Error != "" {
-		return nil, fmt.Errorf(resp.Error)
+		return nil, fmt.Errorf("%s", resp.Error)
 	}
 	return resp.Result, nil
 }
