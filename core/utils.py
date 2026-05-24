@@ -14,24 +14,3 @@ def is_git_repo(path: str) -> bool:
         return res.returncode == 0
     except Exception:
         return False
-
-def get_language(filename: str) -> str:
-    ext = "".join(Path(filename).suffixes).lower()
-    mapping = {
-        ".py": "Python",
-        ".go": "Go",
-        ".js": "JavaScript",
-        ".ts": "TypeScript",
-        ".html": "HTML",
-        ".css": "CSS",
-        ".md": "Markdown",
-        ".json": "JSON",
-        ".txt": "Text",
-        ".rs": "Rust",
-        ".c": "C",
-        ".cpp": "C++",
-        ".h": "C/C++ Header",
-        ".sh": "Shell",
-        ".ps1": "PowerShell"
-    }
-    return mapping.get(ext, "Plain Text")
