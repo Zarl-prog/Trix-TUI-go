@@ -150,5 +150,9 @@ func (b *Bridge) Events() <-chan RPCEvent {
 
 func (b *Bridge) Close() {
 	b.Send("quit", nil)
-	b.cmd.Wait()
+	// Give the Python process a moment to exit gracefully, then kill
+	if b.cmd != nil && b.cmd.Process != nil {
+		b.cmd.Process.Kill()
+		b.cmd.Wait()
+	}
 }

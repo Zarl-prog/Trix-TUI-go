@@ -67,6 +67,7 @@ HANDLERS = {
     "start_terminal": lambda r: start_terminal(r),
     "terminal_write": lambda r: terminal_write(r),
     "stop_terminal":  lambda r: stop_terminal(r),
+    "quit":           lambda r: sys.exit(0),
 }
 
 
