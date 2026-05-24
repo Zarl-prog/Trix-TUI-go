@@ -461,6 +461,7 @@ func (m *model) submitAITerminal() tea.Cmd {
 	m.terminalHistIdx = -1
 
 	cmd := runCommand(m.bridge, input)
+	m.terminalVisible = true
 	m.active = "terminal"
 	m.textarea.Blur()
 	return cmd
@@ -476,6 +477,7 @@ func (m *model) injectContextFilePath() tea.Cmd {
 	m.terminalInput = contextText
 	m.statusMsg = "Injected file path into Terminal"
 	m.isError = false
+	m.terminalVisible = true
 	m.active = "terminal"
 	m.textarea.Blur()
 	return nil
@@ -525,6 +527,7 @@ func (m *model) injectContextSelection() tea.Cmd {
 	m.terminalInput = contextText
 	m.statusMsg = "Injected context into Terminal"
 	m.isError = false
+	m.terminalVisible = true
 	m.active = "terminal"
 	m.textarea.Blur()
 	return nil
@@ -543,6 +546,7 @@ func (m *model) injectContextFullFile() tea.Cmd {
 	m.terminalInput = contextText
 	m.statusMsg = "Injected full file into Terminal"
 	m.isError = false
+	m.terminalVisible = true
 	m.active = "terminal"
 	m.textarea.Blur()
 	return nil
@@ -648,6 +652,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.currentPath = msg.Path
 			m.currentLang = detectLanguage(msg.Path)
 			m.textarea.SetValue(msg.Content)
+			m.editorVisible = true
 			m.active = "editor"
 			m.textarea.Focus()
 			m.statusMsg = "Opened " + filepath.Base(msg.Path)
@@ -1002,6 +1007,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchQuery = ""
 				m.searchMatches = nil
 				m.searchIdx = 0
+				m.editorVisible = true
 				m.active = "editor"
 				m.textarea.Focus()
 				return m, nil
@@ -1305,7 +1311,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 
 		case "terminal":
-			buf := m.terminalBuf
 			input := m.terminalInput
 			history := m.terminalHistory
 			histIdx := m.terminalHistIdx
@@ -1365,8 +1370,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, terminalWrite(m.bridge, "\x03")
 				}
 			case "ctrl+l":
-				buf.Reset()
-				return m, nil
+				// Handled globally
 			default:
 				if len(msg.String()) == 1 {
 					m.terminalInput += msg.String()
@@ -1378,56 +1382,46 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		
-		// Calculate editor width based on layout mode
+		// Calculate editor width using the same unified logic as View()
+		filesW := 0
+		if m.fileTreeVisible {
+			filesW = (m.width * 20) / 100
+			if m.filesWidth > 0 {
+				filesW = m.filesWidth
+			}
+		}
+
+		gap := 1
+		gapCount := 0
+		if m.fileTreeVisible && (m.editorVisible || m.terminalVisible) {
+			gapCount++
+		}
+		if m.editorVisible && m.terminalVisible {
+			gapCount++
+		}
+
+		remaining := m.width - filesW - (gapCount * gap)
+		if remaining < 0 {
+			remaining = 0
+		}
+
 		var editorW int
-		switch m.layoutMode {
-		case 0: // Classic
-			filesW := 0
-			if m.fileTreeVisible {
-				filesW = (m.width * 20) / 100
-				if m.filesWidth > 0 {
-					filesW = m.filesWidth
-				}
-			}
-
-			gap := 1
-			gapCount := 0
-			if m.fileTreeVisible && (m.editorVisible || m.terminalVisible) {
-				gapCount++
-			}
-			if m.editorVisible && m.terminalVisible {
-				gapCount++
-			}
-
-			remaining := m.width - filesW - (gapCount * gap)
-			if remaining < 0 {
-				remaining = 0
-			}
-
-			if m.editorVisible && m.terminalVisible {
+		if m.editorVisible && m.terminalVisible {
+			switch m.layoutMode {
+			case 1: // AI Developer
+				editorW = (remaining * 60) / 100
+			case 3: // Terminal Focus
+				editorW = (remaining * 40) / 100
+			default:
 				editorW = remaining / 2
-				if m.editorWidth > 0 {
-					editorW = m.editorWidth
-				}
-			} else if m.editorVisible {
-				editorW = remaining
-			} else {
-				editorW = 0
 			}
-		case 1: // AI Developer
-			editorW = (m.width * 60) / 100
 			if m.editorWidth > 0 {
 				editorW = m.editorWidth
 			}
-		case 2: // Focus - full width
-			editorW = m.width
-		case 3: // Terminal Focus
-			editorW = (m.width * 40) / 100
-			if m.editorWidth > 0 {
-				editorW = m.editorWidth
-			}
-		default:
-			editorW = (m.width * 45) / 100
+		} else if m.editorVisible {
+			editorW = remaining
+		} else {
+			editorW = 0
 		}
 		
 		innerEditorW := editorW - 6 // room for line numbers + gutter
@@ -1843,155 +1837,94 @@ func (m model) View() string {
 	headerSep := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Width(m.width).Render(strings.Repeat("─", m.width))
 	header := lipgloss.JoinVertical(lipgloss.Left, headerContent, headerSep)
 
-	// --- 2. MAIN AREA (per layout mode) ---
+	// --- 2. MAIN AREA (unified layout logic) ---
 	var mainArea string
-
-	switch m.layoutMode {
-	case 0: // Classic: Files | Editor | Terminal
-		filesW := 0
-		if m.fileTreeVisible {
-			filesW = (m.width * 20) / 100
-			if m.filesWidth > 0 {
-				filesW = m.filesWidth
-			}
+	filesW := 0
+	if m.fileTreeVisible {
+		filesW = (m.width * 20) / 100
+		if m.filesWidth > 0 {
+			filesW = m.filesWidth
 		}
-
-		gapCount := 0
-		if m.fileTreeVisible && (m.editorVisible || m.terminalVisible) {
-			gapCount++
-		}
-		if m.editorVisible && m.terminalVisible {
-			gapCount++
-		}
-
-		remaining := m.width - filesW - (gapCount * gap)
-		if remaining < 0 {
-			remaining = 0
-		}
-
-		editorW := 0
-		terminalW := 0
-		if m.editorVisible && m.terminalVisible {
-			editorW = remaining / 2
-			if m.editorWidth > 0 {
-				editorW = m.editorWidth
-			}
-			terminalW = remaining - editorW
-		} else if m.editorVisible {
-			editorW = remaining
-		} else if m.terminalVisible {
-			terminalW = remaining
-		}
-
-		var panels []string
-		divStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Width(gap).Render("│")
-
-		if m.fileTreeVisible {
-			panels = append(panels, renderFiles(filesW, mainH, m.active == "files", t, m.flatTree, m.fileCursor, m.expanded))
-		}
-
-		if m.editorVisible {
-			if len(panels) > 0 {
-				panels = append(panels, divStyle)
-			}
-			editorContent := m.textarea.Value()
-			editorView := renderEditorView(editorContent, m.currentLang, t, m.cursorLine, m.cursorCol, editorW-2, mainH-2, m.cursorVisible, m.active == "editor")
-			if m.searchOpen {
-				matchInfo := ""
-				if len(m.searchMatches) > 0 {
-					matchInfo = fmt.Sprintf("  %d of %d", m.searchIdx+1, len(m.searchMatches))
-				}
-				searchBar := lipgloss.NewStyle().
-					Foreground(lipgloss.Color(t.Accent)).
-					Background(lipgloss.Color(t.Surface)).
-					Width(editorW - 2).
-					Render(fmt.Sprintf(" Search: %s%s    [Enter] next  [Esc] close", m.searchQuery, matchInfo))
-				editorView = searchBar + "\n" + editorView
-			}
-			panels = append(panels, renderPanel("Editor", editorW, mainH, m.active == "editor", t, editorView))
-		}
-
-		if m.terminalVisible {
-			if len(panels) > 0 {
-				panels = append(panels, divStyle)
-			}
-			panels = append(panels, renderTerminal("Terminal", terminalW, mainH, m.active == "terminal", t, m.terminalBuf.String(), m.terminalInput, m.cursorVisible, m.aiAgentName))
-		}
-
-		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, panels...)
-
-	case 1: // AI Developer: Editor (60%) | AI Terminal (40%)
-		m.fileTreeVisible = false
-		m.editorVisible = true
-		m.terminalVisible = true
-		editorW := (m.width * 60) / 100
-		aiTermW := m.width - editorW - gap
-
-		editorContent := m.textarea.Value()
-		editorView := renderEditorView(editorContent, m.currentLang, t, m.cursorLine, m.cursorCol, editorW-2, mainH-2, m.cursorVisible, m.active == "editor")
-		if m.searchOpen {
-			matchInfo := ""
-			if len(m.searchMatches) > 0 {
-				matchInfo = fmt.Sprintf("  %d of %d", m.searchIdx+1, len(m.searchMatches))
-			}
-			searchBar := lipgloss.NewStyle().
-				Foreground(lipgloss.Color(t.Accent)).
-				Background(lipgloss.Color(t.Surface)).
-				Width(editorW - 2).
-				Render(fmt.Sprintf(" Search: %s%s    [Enter] next  [Esc] close", m.searchQuery, matchInfo))
-			editorView = searchBar + "\n" + editorView
-		}
-		editorPanel := renderPanel("Editor", editorW, mainH, m.active == "editor", t, editorView)
-		divStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Width(gap).Render("│")
-		aiTermPanel := renderTerminal("AI Terminal", aiTermW, mainH, m.active == "terminal", t, m.terminalBuf.String(), m.terminalInput, m.cursorVisible, m.aiAgentName)
-		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, editorPanel, divStyle, aiTermPanel)
-
-	case 2: // Focus: Just Editor (100%)
-		m.fileTreeVisible = false
-		m.editorVisible = true
-		m.terminalVisible = false
-		editorContent := m.textarea.Value()
-		editorView := renderEditorView(editorContent, m.currentLang, t, m.cursorLine, m.cursorCol, m.width-2, mainH-2, m.cursorVisible, true)
-		if m.searchOpen {
-			matchInfo := ""
-			if len(m.searchMatches) > 0 {
-				matchInfo = fmt.Sprintf("  %d of %d", m.searchIdx+1, len(m.searchMatches))
-			}
-			searchBar := lipgloss.NewStyle().
-				Foreground(lipgloss.Color(t.Accent)).
-				Background(lipgloss.Color(t.Surface)).
-				Width(m.width - 2).
-				Render(fmt.Sprintf(" Search: %s%s    [Enter] next  [Esc] close", m.searchQuery, matchInfo))
-			editorView = searchBar + "\n" + editorView
-		}
-		mainArea = renderPanel("Editor", m.width, mainH, true, t, editorView)
-
-	case 3: // Terminal Focus: Editor (40%) | AI Terminal (60%)
-		m.fileTreeVisible = false
-		m.editorVisible = true
-		m.terminalVisible = true
-		editorW := (m.width * 40) / 100
-		aiTermW := m.width - editorW - gap
-
-		editorContent := m.textarea.Value()
-		editorView := renderEditorView(editorContent, m.currentLang, t, m.cursorLine, m.cursorCol, editorW-2, mainH-2, m.cursorVisible, m.active == "editor")
-		if m.searchOpen {
-			matchInfo := ""
-			if len(m.searchMatches) > 0 {
-				matchInfo = fmt.Sprintf("  %d of %d", m.searchIdx+1, len(m.searchMatches))
-			}
-			searchBar := lipgloss.NewStyle().
-				Foreground(lipgloss.Color(t.Accent)).
-				Background(lipgloss.Color(t.Surface)).
-				Width(editorW - 2).
-				Render(fmt.Sprintf(" Search: %s%s    [Enter] next  [Esc] close", m.searchQuery, matchInfo))
-			editorView = searchBar + "\n" + editorView
-		}
-		editorPanel := renderPanel("Editor", editorW, mainH, m.active == "editor", t, editorView)
-		divStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Width(gap).Render("│")
-		aiTermPanel := renderTerminal("AI Terminal", aiTermW, mainH, m.active == "terminal", t, m.terminalBuf.String(), m.terminalInput, m.cursorVisible, m.aiAgentName)
-		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, editorPanel, divStyle, aiTermPanel)
 	}
+
+	gapCount := 0
+	if m.fileTreeVisible && (m.editorVisible || m.terminalVisible) {
+		gapCount++
+	}
+	if m.editorVisible && m.terminalVisible {
+		gapCount++
+	}
+
+	remaining := m.width - filesW - (gapCount * gap)
+	if remaining < 0 {
+		remaining = 0
+	}
+
+	editorW := 0
+	terminalW := 0
+	if m.editorVisible && m.terminalVisible {
+		switch m.layoutMode {
+		case 1: // AI Developer
+			editorW = (remaining * 60) / 100
+		case 3: // Terminal Focus
+			editorW = (remaining * 40) / 100
+		default:
+			editorW = remaining / 2
+		}
+		if m.editorWidth > 0 {
+			editorW = m.editorWidth
+		}
+		terminalW = remaining - editorW
+	} else if m.editorVisible {
+		editorW = remaining
+	} else if m.terminalVisible {
+		terminalW = remaining
+	}
+
+	var panels []string
+	borderColor := t.Border
+	if m.dragging {
+		borderColor = t.BorderFocused
+	}
+	divStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(borderColor)).Width(gap).Render("│")
+
+	if m.fileTreeVisible {
+		panels = append(panels, renderFiles(filesW, mainH, m.active == "files", t, m.flatTree, m.fileCursor, m.expanded))
+	}
+
+	if m.editorVisible {
+		if len(panels) > 0 {
+			panels = append(panels, divStyle)
+		}
+		editorContent := m.textarea.Value()
+		editorView := renderEditorView(editorContent, m.currentLang, t, m.cursorLine, m.cursorCol, editorW-2, mainH-2, m.cursorVisible, m.active == "editor")
+		if m.searchOpen {
+			matchInfo := ""
+			if len(m.searchMatches) > 0 {
+				matchInfo = fmt.Sprintf("  %d of %d", m.searchIdx+1, len(m.searchMatches))
+			}
+			searchBar := lipgloss.NewStyle().
+				Foreground(lipgloss.Color(t.Accent)).
+				Background(lipgloss.Color(t.Surface)).
+				Width(editorW - 2).
+				Render(fmt.Sprintf(" Search: %s%s    [Enter] next  [Esc] close", m.searchQuery, matchInfo))
+			editorView = searchBar + "\n" + editorView
+		}
+		panels = append(panels, renderPanel("Editor", editorW, mainH, m.active == "editor", t, editorView))
+	}
+
+	if m.terminalVisible {
+		if len(panels) > 0 {
+			panels = append(panels, divStyle)
+		}
+		terminalTitle := "Terminal"
+		if m.layoutMode == 1 || m.layoutMode == 3 {
+			terminalTitle = "AI Terminal"
+		}
+		panels = append(panels, renderTerminal(terminalTitle, terminalW, mainH, m.active == "terminal", t, m.terminalBuf.String(), m.terminalInput, m.cursorVisible, m.aiAgentName))
+	}
+
+	mainArea = lipgloss.JoinHorizontal(lipgloss.Top, panels...)
 
 	// --- 3. STATUS BAR ---
 	statusBrand := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)).Bold(true).Background(lipgloss.Color(t.SurfaceAlt)).Padding(0, 1).Render("TRIX")
