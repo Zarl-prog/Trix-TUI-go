@@ -2015,21 +2015,6 @@ func renderOverlay(mode, input, title string, theme Theme) string {
 // Syntax Highlighting
 // ==============================================================================
 
-// Token types for syntax highlighting
-type tokenType int
-
-const (
-	tokenPlain    tokenType = iota
-	tokenKeyword
-	tokenString
-	tokenComment
-	tokenNumber
-	tokenBuiltin
-	tokenOperator
-	tokenPunct
-	tokenType_keyword // type names in Go, class names in Python/JS
-)
-
 // Language keyword sets
 var goKeywords = map[string]bool{
 	"break": true, "case": true, "chan": true, "const": true, "continue": true,
@@ -2240,6 +2225,32 @@ func highlightContent(content string, lang string, theme Theme) []string {
 	return highlighted
 }
 
+// stripANSI removes ANSI escape sequences from a string, returning only visible text.
+func stripANSI(s string) string {
+	var result strings.Builder
+	result.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		if s[i] == '\x1b' {
+			i++
+			if i < len(s) && s[i] == '[' {
+				i++
+				// Skip CSI sequence parameters (digits and semicolons)
+				for i < len(s) && !((s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 'a' && s[i] <= 'z')) {
+					i++
+				}
+				if i < len(s) {
+					i++ // skip the terminating letter
+				}
+			}
+			continue
+		}
+		result.WriteByte(s[i])
+		i++
+	}
+	return result.String()
+}
+
 // renderEditorView renders the editor content with syntax highlighting,
 // line numbers, and cursor position.
 func renderEditorView(content string, lang string, theme Theme, cursorLine, cursorCol int, width, height int, cursorVisible bool, active bool) string {
@@ -2331,11 +2342,11 @@ func renderEditorView(content string, lang string, theme Theme, cursorLine, curs
 		line := highlighted[i]
 		lineWidth := lipgloss.Width(line)
 		if lineWidth > innerWidth {
-			// Truncate line to fit
+			// Truncate line to fit — strip ANSI first so escape codes aren't counted as visible chars
+			plainLine := stripANSI(line)
 			truncated := ""
-			runes := []rune(line)
 			w := 0
-			for _, r := range runes {
+			for _, r := range plainLine {
 				rw := lipgloss.Width(string(r))
 				if w+rw > innerWidth-3 {
 					truncated += "..."
@@ -2344,6 +2355,8 @@ func renderEditorView(content string, lang string, theme Theme, cursorLine, curs
 				w += rw
 				truncated += string(r)
 			}
+			// Re-highlight the truncated plain text
+			truncated = highlightLine(truncated, lang, theme)
 			if isCursorLine {
 				result.WriteString(lipgloss.NewStyle().Background(lipgloss.Color(theme.CursorLine)).Render(truncated))
 			} else {
