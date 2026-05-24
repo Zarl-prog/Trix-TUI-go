@@ -118,6 +118,11 @@ type model struct {
 	overlayInput    string
 	overlayTitle    string
 	
+	// Undo/Redo
+	undoStack       []string
+	redoStack       []string
+	maxUndo         int
+	
 	// Status
 	statusMsg       string
 	isError         bool
@@ -203,8 +208,10 @@ func initialModel() model {
 		active:            "files",
 		currentFolder:     filepath.Base(cwd),
 		currentTheme:      theme,
-		themeIdx:          themeIdx,
-		textarea:          ta,
+		themeIdx:          themeIdx,			textarea:          ta,
+			undoStack:         []string{},
+			redoStack:         []string{},
+			maxUndo:           100,
 		terminalBuf:       &strings.Builder{},
 		terminalHistIdx:   -1,
 		aiTerminalBuf:     &strings.Builder{},
@@ -875,6 +882,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.isError = false
 		case "ctrl+b":
 			m.fileTreeVisible = !m.fileTreeVisible
+		case "ctrl+z":
+			if len(m.undoStack) > 0 {
+				current := m.textarea.Value()
+				m.redoStack = append(m.redoStack, current)
+				prev := m.undoStack[len(m.undoStack)-1]
+				m.undoStack = m.undoStack[:len(m.undoStack)-1]
+				m.textarea.SetValue(prev)
+				m.hasChanges = true
+				m.statusMsg = "Undo"
+				m.isError = false
+			}
+			return m, nil
+		case "ctrl+y":
+			if len(m.redoStack) > 0 {
+				current := m.textarea.Value()
+				m.undoStack = append(m.undoStack, current)
+				next := m.redoStack[len(m.redoStack)-1]
+				m.redoStack = m.redoStack[:len(m.redoStack)-1]
+				m.textarea.SetValue(next)
+				m.hasChanges = true
+				m.statusMsg = "Redo"
+				m.isError = false
+			}
+			return m, nil
 		case "ctrl+\\":
 			m.zenMode = !m.zenMode
 		case "ctrl+f":
@@ -1137,9 +1168,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "editor":
+			// Save content for undo only on content-modifying keys
+			switch msg.String() {
+			case "ctrl+z", "ctrl+y":
+				// Already handled globally, don't double-process
+				var cmd tea.Cmd
+				m.textarea, cmd = m.textarea.Update(msg)
+				return m, cmd
+			}
+			prev := m.textarea.Value()
 			var cmd tea.Cmd
 			m.textarea, cmd = m.textarea.Update(msg)
-			if m.currentPath != "" {
+			curr := m.textarea.Value()
+			if curr != prev && m.currentPath != "" {
+				m.undoStack = append(m.undoStack, prev)
+				if len(m.undoStack) > m.maxUndo {
+					m.undoStack = m.undoStack[len(m.undoStack)-m.maxUndo:]
+				}
+				m.redoStack = nil
 				m.hasChanges = true
 			}
 			return m, cmd
