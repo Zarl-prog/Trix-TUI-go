@@ -479,6 +479,21 @@ func (m *model) injectContextFilePath() tea.Cmd {
 	return nil
 }
 
+// updateCursorPos updates the tracked cursor line and column from the textarea.
+func (m *model) updateCursorPos() {
+	// The bubbles textarea tracks cursor internally via character offset.
+	// We approximate cursorLine from the textarea.Line() method.
+	content := m.textarea.Value()
+	lines := strings.Split(content, "\n")
+	if m.textarea.Line() < len(lines) {
+		m.cursorLine = m.textarea.Line()
+		cursorLine := lines[m.cursorLine]
+		// Approximate column from character offset within the line
+		// For simplicity, use the line width
+		m.cursorCol = len(cursorLine)
+	}
+}
+
 func (m *model) injectContextSelection() tea.Cmd {
 	if m.currentPath == "" {
 		m.statusMsg = "No file open to inject from"
@@ -1197,6 +1212,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Already handled globally, don't double-process
 				var cmd tea.Cmd
 				m.textarea, cmd = m.textarea.Update(msg)
+				// Update cursor position
+				m.updateCursorPos()
 				return m, cmd
 			}
 			prev := m.textarea.Value()
@@ -1211,6 +1228,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.redoStack = nil
 				m.hasChanges = true
 			}
+			// Update cursor position after every edit
+			m.updateCursorPos()
 			return m, cmd
 
 		case "terminal":
@@ -1709,7 +1728,8 @@ func (m model) View() string {
 
 	// --- ZEN MODE ---
 	if m.zenMode {
-		editorView := m.textarea.View()
+		content := m.textarea.Value()
+		editorView := renderEditorView(content, m.currentLang, t, m.cursorLine, m.cursorCol, m.width, m.height-1, m.cursorVisible, true)
 		hint := lipgloss.NewStyle().Foreground(lipgloss.Color(t.TextMuted)).Render(" ctrl+\\ exit zen ")
 		return editorView + "\n" + strings.Repeat(" ", m.width-lipgloss.Width(hint)) + hint
 	}
@@ -1769,7 +1789,8 @@ func (m model) View() string {
 			filesPanel := renderFiles(filesW, mainH, m.active == "files", t, m.flatTree, m.fileCursor, m.expanded)
 			divStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Width(gap).Render("│")
 			
-			editorView := m.textarea.View()
+			editorContent := m.textarea.Value()
+			editorView := renderEditorView(editorContent, m.currentLang, t, m.cursorLine, m.cursorCol, editorW-2, mainH-2, m.cursorVisible, m.active == "editor")
 			if m.searchOpen {
 				matchInfo := ""
 				if len(m.searchMatches) > 0 {
@@ -1787,7 +1808,8 @@ func (m model) View() string {
 			terminalPanel := renderTerminal(terminalW, mainH, m.active == "terminal", t, m.terminalBuf.String(), m.terminalInput, m.cursorVisible)
 			mainArea = lipgloss.JoinHorizontal(lipgloss.Top, filesPanel, divStyle, editorPanel, divStyle2, terminalPanel)
 		} else {
-			editorView := m.textarea.View()
+			editorContent := m.textarea.Value()
+			editorView := renderEditorView(editorContent, m.currentLang, t, m.cursorLine, m.cursorCol, editorW-2, mainH-2, m.cursorVisible, m.active == "editor")
 			if m.searchOpen {
 				matchInfo := ""
 				if len(m.searchMatches) > 0 {
@@ -1810,7 +1832,8 @@ func (m model) View() string {
 		editorW := (m.width * 60) / 100
 		aiTermW := m.width - editorW - gap
 
-		editorView := m.textarea.View()
+		editorContent := m.textarea.Value()
+		editorView := renderEditorView(editorContent, m.currentLang, t, m.cursorLine, m.cursorCol, editorW-2, mainH-2, m.cursorVisible, m.active == "editor")
 		if m.searchOpen {
 			matchInfo := ""
 			if len(m.searchMatches) > 0 {
@@ -1829,7 +1852,8 @@ func (m model) View() string {
 		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, editorPanel, divStyle, aiTermPanel)
 
 	case 2: // Focus: Just Editor (100%)
-		editorView := m.textarea.View()
+		editorContent := m.textarea.Value()
+		editorView := renderEditorView(editorContent, m.currentLang, t, m.cursorLine, m.cursorCol, m.width-2, mainH-2, m.cursorVisible, true)
 		if m.searchOpen {
 			matchInfo := ""
 			if len(m.searchMatches) > 0 {
@@ -1848,7 +1872,8 @@ func (m model) View() string {
 		editorW := (m.width * 40) / 100
 		aiTermW := m.width - editorW - gap
 
-		editorView := m.textarea.View()
+		editorContent := m.textarea.Value()
+		editorView := renderEditorView(editorContent, m.currentLang, t, m.cursorLine, m.cursorCol, editorW-2, mainH-2, m.cursorVisible, m.active == "editor")
 		if m.searchOpen {
 			matchInfo := ""
 			if len(m.searchMatches) > 0 {
@@ -1984,6 +2009,361 @@ func renderOverlay(mode, input, title string, theme Theme) string {
 	)
 	
 	return borderStyle.Render(content)
+}
+
+// ==============================================================================
+// Syntax Highlighting
+// ==============================================================================
+
+// Token types for syntax highlighting
+type tokenType int
+
+const (
+	tokenPlain    tokenType = iota
+	tokenKeyword
+	tokenString
+	tokenComment
+	tokenNumber
+	tokenBuiltin
+	tokenOperator
+	tokenPunct
+	tokenType_keyword // type names in Go, class names in Python/JS
+)
+
+// Language keyword sets
+var goKeywords = map[string]bool{
+	"break": true, "case": true, "chan": true, "const": true, "continue": true,
+	"default": true, "defer": true, "else": true, "fallthrough": true, "for": true,
+	"func": true, "go": true, "goto": true, "if": true, "import": true,
+	"interface": true, "map": true, "package": true, "range": true, "return": true,
+	"select": true, "struct": true, "switch": true, "type": true, "var": true,
+}
+
+var goBuiltins = map[string]bool{
+	"nil": true, "true": true, "false": true,
+	"int": true, "string": true, "bool": true, "byte": true, "rune": true,
+	"float64": true, "float32": true, "int64": true, "int32": true,
+	"uint": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true,
+	"error": true, "any": true, "comparable": true,
+	"len": true, "cap": true, "make": true, "new": true, "append": true,
+	"copy": true, "delete": true, "close": true, "panic": true, "recover": true,
+	"print": true, "println": true,
+}
+
+var pyKeywords = map[string]bool{
+	"False": true, "None": true, "True": true, "and": true, "as": true,
+	"assert": true, "async": true, "await": true, "break": true, "class": true,
+	"continue": true, "def": true, "del": true, "elif": true, "else": true,
+	"except": true, "finally": true, "for": true, "from": true, "global": true,
+	"if": true, "import": true, "in": true, "is": true, "lambda": true,
+	"nonlocal": true, "not": true, "or": true, "pass": true, "raise": true,
+	"return": true, "try": true, "while": true, "with": true, "yield": true,
+}
+
+var pyBuiltins = map[string]bool{
+	"print": true, "len": true, "type": true, "int": true, "str": true,
+	"float": true, "bool": true, "list": true, "dict": true, "set": true,
+	"tuple": true, "range": true, "enumerate": true, "zip": true, "map": true,
+	"filter": true, "sorted": true, "reversed": true, "open": true,
+	"isinstance": true, "hasattr": true, "getattr": true, "super": true,
+	"self": true, "cls": true,
+}
+
+var jsKeywords = map[string]bool{
+	"break": true, "case": true, "catch": true, "class": true, "const": true,
+	"continue": true, "debugger": true, "default": true, "delete": true,
+	"do": true, "else": true, "export": true, "extends": true, "finally": true,
+	"for": true, "function": true, "if": true, "import": true, "in": true,
+	"instanceof": true, "let": true, "new": true, "of": true, "return": true,
+	"static": true, "super": true, "switch": true, "this": true, "throw": true,
+	"try": true, "typeof": true, "var": true, "void": true, "while": true,
+	"with": true, "yield": true, "async": true, "await": true,
+}
+
+var jsBuiltins = map[string]bool{
+	"true": true, "false": true, "null": true, "undefined": true,
+	"NaN": true, "Infinity": true, "console": true, "window": true,
+	"document": true, "Array": true, "Object": true, "String": true,
+	"Number": true, "Boolean": true, "Promise": true, "Map": true, "Set": true,
+	"JSON": true, "Math": true, "Date": true, "RegExp": true,
+	"setTimeout": true, "setInterval": true, "fetch": true,
+}
+
+func getKeywordSet(lang string) (map[string]bool, map[string]bool) {
+	switch lang {
+	case "Go":
+		return goKeywords, goBuiltins
+	case "Python":
+		return pyKeywords, pyBuiltins
+	case "JavaScript", "TypeScript":
+		return jsKeywords, jsBuiltins
+	default:
+		return nil, nil
+	}
+}
+
+// highlightLine applies syntax highlighting to a single line and returns
+// a lipgloss-styled string using the theme colors.
+func highlightLine(line string, lang string, theme Theme) string {
+	keywords, builtins := getKeywordSet(lang)
+	if keywords == nil {
+		// No highlighting for unknown languages
+		return line
+	}
+
+	// Colors
+	keywordColor := lipgloss.Color(theme.AccentAlt)       // Keywords: blue-ish
+	stringColor := lipgloss.Color(theme.Success)           // Strings: green
+	commentColor := lipgloss.Color(theme.TextMuted)        // Comments: gray
+	numberColor := lipgloss.Color(theme.Warning)           // Numbers: orange
+	builtinColor := lipgloss.Color(theme.Accent)           // Builtins: bright blue
+	plainColor := lipgloss.Color(theme.Text)               // Plain text
+
+	var result strings.Builder
+	i := 0
+	lineLen := len(line)
+
+	for i < lineLen {
+		ch := line[i]
+
+		// Single-line comment: // or #
+		if lang == "Go" || lang == "JavaScript" || lang == "TypeScript" {
+			if i+1 < lineLen && line[i] == '/' && line[i+1] == '/' {
+				styled := lipgloss.NewStyle().Foreground(commentColor).Render(line[i:])
+				result.WriteString(styled)
+				break
+			}
+			// Block comment start (will highlight rest of line as comment)
+			if i+1 < lineLen && line[i] == '/' && line[i+1] == '*' {
+				styled := lipgloss.NewStyle().Foreground(commentColor).Render(line[i:])
+				result.WriteString(styled)
+				break
+			}
+		}
+		if lang == "Python" {
+			if ch == '#' {
+				styled := lipgloss.NewStyle().Foreground(commentColor).Render(line[i:])
+				result.WriteString(styled)
+				break
+			}
+		}
+
+		// Strings: double-quoted, single-quoted, backtick
+		if ch == '"' || ch == '\'' || ch == '`' {
+			delim := ch
+			start := i
+			i++
+			for i < lineLen && line[i] != delim {
+				if line[i] == '\\' && i+1 < lineLen {
+					i += 2 // skip escaped char
+				} else {
+					i++
+				}
+			}
+			if i < lineLen {
+				i++ // closing delimiter
+			}
+			styled := lipgloss.NewStyle().Foreground(stringColor).Render(line[start:i])
+			result.WriteString(styled)
+			continue
+		}
+
+		// Python triple-quoted strings
+		if lang == "Python" && (ch == '"' || ch == '\'') {
+			if i+2 < lineLen && line[i] == line[i+1] && line[i+1] == line[i+2] {
+				delim := line[i]
+				start := i
+				i += 3
+				for i < lineLen-2 {
+					if line[i] == delim && line[i+1] == delim && line[i+2] == delim {
+						i += 3
+						break
+					}
+					i++
+				}
+				if i >= lineLen-2 {
+					i = lineLen
+				}
+				styled := lipgloss.NewStyle().Foreground(stringColor).Render(line[start:i])
+				result.WriteString(styled)
+				continue
+			}
+		}
+
+		// Numbers
+		if ch >= '0' && ch <= '9' {
+			start := i
+			i++
+			for i < lineLen && (line[i] >= '0' && line[i] <= '9' || line[i] == '.' || line[i] == 'x' || line[i] == 'X' || (line[i] >= 'a' && line[i] <= 'f') || (line[i] >= 'A' && line[i] <= 'F')) {
+				i++
+			}
+			styled := lipgloss.NewStyle().Foreground(numberColor).Render(line[start:i])
+			result.WriteString(styled)
+			continue
+		}
+
+		// Identifiers and keywords
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_' {
+			start := i
+			i++
+			for i < lineLen && ((line[i] >= 'a' && line[i] <= 'z') || (line[i] >= 'A' && line[i] <= 'Z') || (line[i] >= '0' && line[i] <= '9') || line[i] == '_') {
+				i++
+			}
+			word := line[start:i]
+			var styled string
+			if keywords[word] {
+				styled = lipgloss.NewStyle().Foreground(keywordColor).Bold(true).Render(word)
+			} else if builtins[word] {
+				styled = lipgloss.NewStyle().Foreground(builtinColor).Render(word)
+			} else {
+				styled = lipgloss.NewStyle().Foreground(plainColor).Render(word)
+			}
+			result.WriteString(styled)
+			continue
+		}
+
+		// Operators and punctuation (passthrough in plain color)
+		result.WriteString(lipgloss.NewStyle().Foreground(plainColor).Render(string(ch)))
+		i++
+	}
+
+	return result.String()
+}
+
+// highlightContent applies syntax highlighting to all lines of content.
+func highlightContent(content string, lang string, theme Theme) []string {
+	lines := strings.Split(content, "\n")
+	highlighted := make([]string, len(lines))
+	for i, line := range lines {
+		highlighted[i] = highlightLine(line, lang, theme)
+	}
+	return highlighted
+}
+
+// renderEditorView renders the editor content with syntax highlighting,
+// line numbers, and cursor position.
+func renderEditorView(content string, lang string, theme Theme, cursorLine, cursorCol int, width, height int, cursorVisible bool, active bool) string {
+	lines := strings.Split(content, "\n")
+	innerWidth := width - 6 // room for line numbers + gutter
+	innerHeight := height
+
+	var result strings.Builder
+
+	// Line number width
+	lineNumWidth := 3
+	if len(lines) >= 100 {
+		lineNumWidth = 4
+	}
+	if len(lines) >= 1000 {
+		lineNumWidth = 5
+	}
+
+	// Highlight if language is known
+	highlighted := highlightContent(content, lang, theme)
+
+	for i := 0; i < innerHeight; i++ {
+		if i >= len(lines) {
+			// Empty line past EOF
+			lineNum := lipgloss.NewStyle().
+				Foreground(lipgloss.Color(theme.LineNumber)).
+				Width(lineNumWidth).
+				Align(lipgloss.Right).
+				Render("~")
+			result.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(theme.LineNumber)).Render("  "))
+			result.WriteString(lineNum)
+			result.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(theme.LineNumber)).Render(" │ "))
+			if i == cursorLine && active && cursorVisible {
+				result.WriteString("█" + strings.Repeat(" ", innerWidth-1))
+			} else {
+				result.WriteString(strings.Repeat(" ", innerWidth))
+			}
+			if i < innerHeight-1 {
+				result.WriteString("\n")
+			}
+			continue
+		}
+
+		// Current line indicator + line number
+		isCursorLine := i == cursorLine && active
+		lineNumStr := fmt.Sprintf("%d", i+1)
+		lineNumStyle := lipgloss.NewStyle().
+			Width(lineNumWidth).
+			Align(lipgloss.Right)
+		if isCursorLine {
+			lineNumStyle = lineNumStyle.
+				Foreground(lipgloss.Color(theme.Accent)).
+				Background(lipgloss.Color(theme.CursorLine))
+		} else {
+			lineNumStyle = lineNumStyle.
+				Foreground(lipgloss.Color(theme.LineNumber))
+		}
+
+		// Gutter mark
+		gutterMark := " "
+		if isCursorLine {
+			gutterMark = "▎"
+			gutterMark = lipgloss.NewStyle().
+				Foreground(lipgloss.Color(theme.Accent)).
+				Background(lipgloss.Color(theme.CursorLine)).
+				Render(gutterMark)
+		} else {
+			gutterMark = lipgloss.NewStyle().
+				Foreground(lipgloss.Color(theme.LineNumber)).
+				Render(" ")
+		}
+
+		gutterSep := lipgloss.NewStyle().
+			Foreground(lipgloss.Color(theme.LineNumber)).
+			Render("│")
+
+		if isCursorLine {
+			gutterSep = lipgloss.NewStyle().
+				Foreground(lipgloss.Color(theme.LineNumber)).
+				Background(lipgloss.Color(theme.CursorLine)).
+				Render(gutterSep)
+		}
+
+		result.WriteString(gutterMark)
+		result.WriteString(lineNumStyle.Render(lineNumStr))
+		result.WriteString(gutterSep)
+
+		// Line content
+		line := highlighted[i]
+		lineWidth := lipgloss.Width(line)
+		if lineWidth > innerWidth {
+			// Truncate line to fit
+			truncated := ""
+			runes := []rune(line)
+			w := 0
+			for _, r := range runes {
+				rw := lipgloss.Width(string(r))
+				if w+rw > innerWidth-3 {
+					truncated += "..."
+					break
+				}
+				w += rw
+				truncated += string(r)
+			}
+			if isCursorLine {
+				result.WriteString(lipgloss.NewStyle().Background(lipgloss.Color(theme.CursorLine)).Render(truncated))
+			} else {
+				result.WriteString(truncated)
+			}
+		} else {
+			padding := strings.Repeat(" ", innerWidth-lineWidth)
+			if isCursorLine {
+				result.WriteString(lipgloss.NewStyle().Background(lipgloss.Color(theme.CursorLine)).Render(line + padding))
+			} else {
+				result.WriteString(line + padding)
+			}
+		}
+
+		if i < innerHeight-1 {
+			result.WriteString("\n")
+		}
+	}
+
+	return result.String()
 }
 
 // ==============================================================================
