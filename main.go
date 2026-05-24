@@ -159,6 +159,8 @@ type model struct {
 	// Toggles
 	zenMode           bool
 	fileTreeVisible   bool
+	editorVisible     bool
+	terminalVisible   bool
 	dragging          bool
 	dragDivider       int // 1 = files|editor, 2 = editor|terminal, 3 = editor|ai-terminal
 	dragStartX        int
@@ -221,6 +223,8 @@ func initialModel() model {
 		currentLang:       "Plain Text",
 		expanded:          map[string]bool{".": true},
 		fileTreeVisible:   fileTreeVis,
+		editorVisible:     true,
+		terminalVisible:   true,
 		bridge:            b,
 	}
 }
@@ -452,14 +456,28 @@ func flattenTree(root FileNode, expanded map[string]bool) []FileNode {
 // ==============================================================================
 
 func (m *model) submitAITerminal() tea.Cmd {
-	if m.aiTerminalInput == "" {
+	input := m.aiTerminalInput
+	if m.layoutMode == 0 {
+		input = m.terminalInput
+	}
+
+	if input == "" {
 		return nil
 	}
-	m.aiTerminalHistory = append(m.aiTerminalHistory, m.aiTerminalInput)
-	m.aiTerminalBuf.WriteString("\nAI ❯ " + m.aiTerminalInput + "\n")
-	cmd := runCommand(m.bridge, m.aiTerminalInput, true)
-	m.aiTerminalInput = ""
-	m.aiTerminalHistIdx = -1
+
+	if m.layoutMode == 1 || m.layoutMode == 3 {
+		m.aiTerminalHistory = append(m.aiTerminalHistory, input)
+		m.aiTerminalBuf.WriteString("\nAI ❯ " + input + "\n")
+		m.aiTerminalInput = ""
+		m.aiTerminalHistIdx = -1
+	} else {
+		m.terminalHistory = append(m.terminalHistory, input)
+		m.terminalBuf.WriteString("\nAI ❯ " + input + "\n")
+		m.terminalInput = ""
+		m.terminalHistIdx = -1
+	}
+
+	cmd := runCommand(m.bridge, input, true)
 	m.active = "terminal"
 	m.textarea.Blur()
 	return cmd
@@ -571,8 +589,20 @@ func cycleLayout(m *model) {
 	switch m.layoutMode {
 	case 0: // Classic
 		m.fileTreeVisible = true
-	case 1, 2, 3: // AI Developer, Focus, Terminal Focus
+		m.editorVisible = true
+		m.terminalVisible = true
+	case 1: // AI Developer
 		m.fileTreeVisible = false
+		m.editorVisible = true
+		m.terminalVisible = true
+	case 2: // Focus
+		m.fileTreeVisible = false
+		m.editorVisible = true
+		m.terminalVisible = false
+	case 3: // Terminal Focus
+		m.fileTreeVisible = false
+		m.editorVisible = true
+		m.terminalVisible = true
 	}
 	if m.layoutMode != 0 && m.active == "files" {
 		m.active = "editor"
@@ -894,21 +924,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		case "ctrl+1":
-			if m.layoutMode == 0 {
+			if m.layoutMode == 0 && m.fileTreeVisible {
 				m.active = "files"
 				m.textarea.Blur()
 			} else {
-				m.statusMsg = "Files panel hidden in current layout"
+				m.statusMsg = "Files panel hidden"
 				m.isError = true
 			}
 			return m, nil
 		case "ctrl+2":
-			m.active = "editor"
-			m.textarea.Focus()
+			if m.editorVisible {
+				m.active = "editor"
+				m.textarea.Focus()
+			} else {
+				m.statusMsg = "Editor panel hidden"
+				m.isError = true
+			}
 			return m, nil
 		case "ctrl+3":
-			m.active = "terminal"
-			m.textarea.Blur()
+			if m.terminalVisible {
+				m.active = "terminal"
+				m.textarea.Blur()
+			} else {
+				m.statusMsg = "Terminal panel hidden"
+				m.isError = true
+			}
 			return m, nil
 		case "ctrl+s":
 			if m.currentPath != "" {
@@ -934,6 +974,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.isError = false
 		case "ctrl+b":
 			m.fileTreeVisible = !m.fileTreeVisible
+			if !m.fileTreeVisible && m.active == "files" {
+				if m.editorVisible {
+					m.active = "editor"
+					m.textarea.Focus()
+				} else if m.terminalVisible {
+					m.active = "terminal"
+				}
+			}
+		case "f3":
+			m.editorVisible = !m.editorVisible
+			if !m.editorVisible && m.active == "editor" {
+				if m.terminalVisible {
+					m.active = "terminal"
+					m.textarea.Blur()
+				} else if m.fileTreeVisible {
+					m.active = "files"
+					m.textarea.Blur()
+				}
+			} else if m.editorVisible && m.active != "files" && !m.terminalVisible {
+				m.active = "editor"
+				m.textarea.Focus()
+			}
+		case "f4":
+			m.terminalVisible = !m.terminalVisible
+			if !m.terminalVisible && m.active == "terminal" {
+				if m.editorVisible {
+					m.active = "editor"
+					m.textarea.Focus()
+				} else if m.fileTreeVisible {
+					m.active = "files"
+				}
+			} else if m.terminalVisible && m.active != "files" && !m.editorVisible {
+				m.active = "terminal"
+			}
 		case "ctrl+z":
 			if len(m.undoStack) > 0 {
 				current := m.textarea.Value()
@@ -1003,19 +1077,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// --- AI Agent Launcher (Alt+1..5) ---
 		case "alt+1":
 			m.aiAgentName = "Claude"
-			m.aiTerminalInput = "claude"
+			if m.layoutMode == 0 {
+				m.terminalInput = "claude"
+			} else {
+				m.aiTerminalInput = "claude"
+			}
 			return m, m.submitAITerminal()
 		case "alt+2":
 			m.aiAgentName = "Codex"
-			m.aiTerminalInput = "codex"
+			if m.layoutMode == 0 {
+				m.terminalInput = "codex"
+			} else {
+				m.aiTerminalInput = "codex"
+			}
 			return m, m.submitAITerminal()
 		case "alt+3":
 			m.aiAgentName = "Gemini"
-			m.aiTerminalInput = "gemini"
+			if m.layoutMode == 0 {
+				m.terminalInput = "gemini"
+			} else {
+				m.aiTerminalInput = "gemini"
+			}
 			return m, m.submitAITerminal()
 		case "alt+4":
 			m.aiAgentName = "Aider"
-			m.aiTerminalInput = "aider"
+			if m.layoutMode == 0 {
+				m.terminalInput = "aider"
+			} else {
+				m.aiTerminalInput = "aider"
+			}
 			return m, m.submitAITerminal()
 		case "alt+5":
 			m.aiAgentName = "Custom"
@@ -1070,6 +1160,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.active = "editor"
 					m.textarea.Focus()
 				case msg.X >= termStart:
+					if msg.Y >= 2 && msg.Y <= 3 {
+						pillX := termStart + 2
+						pills := []string{"Claude", "Codex", "Gemini", "Aider", "Custom"}
+						keys := []string{"1", "2", "3", "4", "5"}
+						for i, p := range pills {
+							pillW := lipgloss.Width(fmt.Sprintf(" %s [Alt+%s] ", p, keys[i])) + 4
+							if msg.X >= pillX && msg.X < pillX+pillW {
+								m.aiAgentName = p
+								if i < 4 {
+									m.terminalInput = strings.ToLower(p)
+									return m, m.submitAITerminal()
+								} else {
+									m.terminalInput = ""
+									m.statusMsg = "Custom AI agent selected. Type your command."
+									m.isError = false
+									m.active = "terminal"
+									m.textarea.Blur()
+									return m, nil
+								}
+							}
+							pillX += pillW + 1
+						}
+					}
 					m.active = "terminal"
 					m.textarea.Blur()
 				}
@@ -1248,12 +1361,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "terminal":
 			// Determine which terminal buffer/input to use based on layout mode
-			isAITerminal := m.layoutMode == 1 || m.layoutMode == 3
+			isAITerminal := m.layoutMode == 1 || m.layoutMode == 3 || (m.layoutMode == 0 && m.aiAgentName != "")
 			buf := m.terminalBuf
 			input := m.terminalInput
 			history := m.terminalHistory
 			histIdx := m.terminalHistIdx
-			if isAITerminal {
+			if m.layoutMode == 1 || m.layoutMode == 3 {
 				buf = m.aiTerminalBuf
 				input = m.aiTerminalInput
 				history = m.aiTerminalHistory
@@ -1265,11 +1378,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if input != "" {
 					history = append(history, input)
 					if isAITerminal {
-						m.aiTerminalHistory = history
-						m.aiTerminalBuf.WriteString("\nAI ❯ " + input + "\n")
+						if m.layoutMode == 1 || m.layoutMode == 3 {
+							m.aiTerminalHistory = history
+							m.aiTerminalBuf.WriteString("\nAI ❯ " + input + "\n")
+						} else {
+							m.terminalHistory = history
+							m.terminalBuf.WriteString("\nAI ❯ " + input + "\n")
+						}
 						cmd := runCommand(m.bridge, input, true)
-						m.aiTerminalInput = ""
-						m.aiTerminalHistIdx = -1
+						if m.layoutMode == 1 || m.layoutMode == 3 {
+							m.aiTerminalInput = ""
+							m.aiTerminalHistIdx = -1
+						} else {
+							m.terminalInput = ""
+							m.terminalHistIdx = -1
+						}
 						return m, cmd
 					} else {
 						m.terminalHistory = history
@@ -1358,21 +1481,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var editorW int
 		switch m.layoutMode {
 		case 0: // Classic
-			filesW := (m.width * 20) / 100
-			if m.filesWidth > 0 {
-				filesW = m.filesWidth
+			filesW := 0
+			if m.fileTreeVisible {
+				filesW = (m.width * 20) / 100
+				if m.filesWidth > 0 {
+					filesW = m.filesWidth
+				}
 			}
-			if !m.fileTreeVisible {
-				filesW = 0
-			}
+
 			gap := 1
-			terminalW := (m.width - filesW - gap*2) / 2
-			if terminalW < 10 {
-				terminalW = 10
+			gapCount := 0
+			if m.fileTreeVisible && (m.editorVisible || m.terminalVisible) {
+				gapCount++
 			}
-			editorW = m.width - filesW - terminalW - gap*2
-			if m.editorWidth > 0 {
-				editorW = m.editorWidth
+			if m.editorVisible && m.terminalVisible {
+				gapCount++
+			}
+
+			remaining := m.width - filesW - (gapCount * gap)
+			if remaining < 0 {
+				remaining = 0
+			}
+
+			if m.editorVisible && m.terminalVisible {
+				editorW = remaining / 2
+				if m.editorWidth > 0 {
+					editorW = m.editorWidth
+				}
+			} else if m.editorVisible {
+				editorW = remaining
+			} else {
+				editorW = 0
 			}
 		case 1: // AI Developer
 			editorW = (m.width * 60) / 100
@@ -1535,18 +1674,33 @@ func renderFiles(width, height int, active bool, theme Theme, tree []FileNode, c
 	return renderPanel("Files", width, height, active, theme, strings.Join(lines, "\n"))
 }
 
-func renderTerminal(width, height int, active bool, theme Theme, content string, input string, cursorVisible bool) string {
+func renderTerminal(width, height int, active bool, theme Theme, content string, input string, cursorVisible bool, agentName string) string {
 	innerWidth := width - 2
 	innerHeight := height - 2
 
-	outputHeight := innerHeight - 1
+	// --- Agent Launcher Bar ---
+	agentBarWidth := innerWidth
+	agentBar := renderAgentBar(agentBarWidth, theme, agentName)
+
+	// --- Separator ---
+	sepStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Border))
+	separator := sepStyle.Render(strings.Repeat("─", agentBarWidth))
+
+	// Available height for terminal content + input
+	barLines := strings.Count(agentBar, "\n") + 1 + 1 // bar + separator
+	availHeight := innerHeight - barLines
+	if availHeight < 2 {
+		availHeight = 2
+	}
+
+	outputHeight := availHeight - 1
 	rawLines := strings.Split(content, "\n")
-	
+
 	var lines []string
 	if len(rawLines) > outputHeight {
 		rawLines = rawLines[len(rawLines)-outputHeight:]
 	}
-	
+
 	for _, line := range rawLines {
 		if lipgloss.Width(line) > innerWidth {
 			line = line[:innerWidth]
@@ -1558,18 +1712,22 @@ func renderTerminal(width, height int, active bool, theme Theme, content string,
 	}
 
 	prompt := "> "
+	if agentName != "" {
+		prompt = "AI ❯ "
+	}
+
 	cursor := ""
 	if cursorVisible && active {
 		cursor = "█"
 	}
-	
+
 	inputLine := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Accent)).Render(prompt) + input + cursor
 	if lipgloss.Width(inputLine) > innerWidth {
 		inputLine = inputLine[lipgloss.Width(inputLine)-innerWidth:]
 	}
 	inputLine += strings.Repeat(" ", innerWidth-lipgloss.Width(inputLine))
-	
-	full := strings.Join(lines, "\n") + "\n" + inputLine
+
+	full := agentBar + "\n" + separator + "\n" + strings.Join(lines, "\n") + "\n" + inputLine
 	return renderPanel("Terminal", width, height, active, theme, full)
 }
 
@@ -1843,63 +2001,82 @@ func (m model) View() string {
 
 	switch m.layoutMode {
 	case 0: // Classic: Files | Editor | Terminal
-		filesW := (m.width * 20) / 100
-		if m.filesWidth > 0 { filesW = m.filesWidth }
-		if !m.fileTreeVisible { filesW = 0 }
-
-		editorW := (m.width - filesW - (gap * 2)) / 2
-		if m.editorWidth > 0 { editorW = m.editorWidth }
-
-		terminalW := m.width - filesW - editorW - (gap * 2)
-		if terminalW < 10 { terminalW = 10 }
-		if !m.fileTreeVisible {
-			editorW = m.width - terminalW - gap*2
+		filesW := 0
+		if m.fileTreeVisible {
+			filesW = (m.width * 20) / 100
+			if m.filesWidth > 0 {
+				filesW = m.filesWidth
+			}
 		}
+
+		gapCount := 0
+		if m.fileTreeVisible && (m.editorVisible || m.terminalVisible) {
+			gapCount++
+		}
+		if m.editorVisible && m.terminalVisible {
+			gapCount++
+		}
+
+		remaining := m.width - filesW - (gapCount * gap)
+		if remaining < 0 {
+			remaining = 0
+		}
+
+		editorW := 0
+		terminalW := 0
+		if m.editorVisible && m.terminalVisible {
+			editorW = remaining / 2
+			if m.editorWidth > 0 {
+				editorW = m.editorWidth
+			}
+			terminalW = remaining - editorW
+		} else if m.editorVisible {
+			editorW = remaining
+		} else if m.terminalVisible {
+			terminalW = remaining
+		}
+
+		var panels []string
+		divStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Width(gap).Render("│")
 
 		if m.fileTreeVisible {
-			filesPanel := renderFiles(filesW, mainH, m.active == "files", t, m.flatTree, m.fileCursor, m.expanded)
-			divStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Width(gap).Render("│")
-			
-			editorContent := m.textarea.Value()
-			editorView := renderEditorView(editorContent, m.currentLang, t, m.cursorLine, m.cursorCol, editorW-2, mainH-2, m.cursorVisible, m.active == "editor")
-			if m.searchOpen {
-				matchInfo := ""
-				if len(m.searchMatches) > 0 {
-					matchInfo = fmt.Sprintf("  %d of %d", m.searchIdx+1, len(m.searchMatches))
-				}
-				searchBar := lipgloss.NewStyle().
-					Foreground(lipgloss.Color(t.Accent)).
-					Background(lipgloss.Color(t.Surface)).
-					Width(editorW - 2).
-					Render(fmt.Sprintf(" Search: %s%s    [Enter] next  [Esc] close", m.searchQuery, matchInfo))
-				editorView = searchBar + "\n" + editorView
-			}
-			editorPanel := renderPanel("Editor", editorW, mainH, m.active == "editor", t, editorView)
-			divStyle2 := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Width(gap).Render("│")
-			terminalPanel := renderTerminal(terminalW, mainH, m.active == "terminal", t, m.terminalBuf.String(), m.terminalInput, m.cursorVisible)
-			mainArea = lipgloss.JoinHorizontal(lipgloss.Top, filesPanel, divStyle, editorPanel, divStyle2, terminalPanel)
-		} else {
-			editorContent := m.textarea.Value()
-			editorView := renderEditorView(editorContent, m.currentLang, t, m.cursorLine, m.cursorCol, editorW-2, mainH-2, m.cursorVisible, m.active == "editor")
-			if m.searchOpen {
-				matchInfo := ""
-				if len(m.searchMatches) > 0 {
-					matchInfo = fmt.Sprintf("  %d of %d", m.searchIdx+1, len(m.searchMatches))
-				}
-				searchBar := lipgloss.NewStyle().
-					Foreground(lipgloss.Color(t.Accent)).
-					Background(lipgloss.Color(t.Surface)).
-					Width(editorW - 2).
-					Render(fmt.Sprintf(" Search: %s%s    [Enter] next  [Esc] close", m.searchQuery, matchInfo))
-				editorView = searchBar + "\n" + editorView
-			}
-			editorPanel := renderPanel("Editor", editorW, mainH, m.active == "editor", t, editorView)
-			divStyle2 := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Width(gap).Render("│")
-			terminalPanel := renderTerminal(terminalW, mainH, m.active == "terminal", t, m.terminalBuf.String(), m.terminalInput, m.cursorVisible)
-			mainArea = lipgloss.JoinHorizontal(lipgloss.Top, editorPanel, divStyle2, terminalPanel)
+			panels = append(panels, renderFiles(filesW, mainH, m.active == "files", t, m.flatTree, m.fileCursor, m.expanded))
 		}
 
+		if m.editorVisible {
+			if len(panels) > 0 {
+				panels = append(panels, divStyle)
+			}
+			editorContent := m.textarea.Value()
+			editorView := renderEditorView(editorContent, m.currentLang, t, m.cursorLine, m.cursorCol, editorW-2, mainH-2, m.cursorVisible, m.active == "editor")
+			if m.searchOpen {
+				matchInfo := ""
+				if len(m.searchMatches) > 0 {
+					matchInfo = fmt.Sprintf("  %d of %d", m.searchIdx+1, len(m.searchMatches))
+				}
+				searchBar := lipgloss.NewStyle().
+					Foreground(lipgloss.Color(t.Accent)).
+					Background(lipgloss.Color(t.Surface)).
+					Width(editorW - 2).
+					Render(fmt.Sprintf(" Search: %s%s    [Enter] next  [Esc] close", m.searchQuery, matchInfo))
+				editorView = searchBar + "\n" + editorView
+			}
+			panels = append(panels, renderPanel("Editor", editorW, mainH, m.active == "editor", t, editorView))
+		}
+
+		if m.terminalVisible {
+			if len(panels) > 0 {
+				panels = append(panels, divStyle)
+			}
+			panels = append(panels, renderTerminal(terminalW, mainH, m.active == "terminal", t, m.terminalBuf.String(), m.terminalInput, m.cursorVisible, m.aiAgentName))
+		}
+
+		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, panels...)
+
 	case 1: // AI Developer: Editor (60%) | AI Terminal (40%)
+		m.fileTreeVisible = false
+		m.editorVisible = true
+		m.terminalVisible = true
 		editorW := (m.width * 60) / 100
 		aiTermW := m.width - editorW - gap
 
@@ -1923,6 +2100,9 @@ func (m model) View() string {
 		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, editorPanel, divStyle, aiTermPanel)
 
 	case 2: // Focus: Just Editor (100%)
+		m.fileTreeVisible = false
+		m.editorVisible = true
+		m.terminalVisible = false
 		editorContent := m.textarea.Value()
 		editorView := renderEditorView(editorContent, m.currentLang, t, m.cursorLine, m.cursorCol, m.width-2, mainH-2, m.cursorVisible, true)
 		if m.searchOpen {
@@ -1940,6 +2120,9 @@ func (m model) View() string {
 		mainArea = renderPanel("Editor", m.width, mainH, true, t, editorView)
 
 	case 3: // Terminal Focus: Editor (40%) | AI Terminal (60%)
+		m.fileTreeVisible = false
+		m.editorVisible = true
+		m.terminalVisible = true
 		editorW := (m.width * 40) / 100
 		aiTermW := m.width - editorW - gap
 
@@ -1972,7 +2155,7 @@ func (m model) View() string {
 	
 	// Active AI agent indicator
 	agentInfo := ""
-	if m.aiAgentName != "" && (m.layoutMode == 1 || m.layoutMode == 3) {
+	if m.aiAgentName != "" {
 		animIndicator := ""
 		if m.aiAgentAnimTick {
 			animIndicator = " ●"
