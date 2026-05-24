@@ -430,7 +430,12 @@ func nodeFromEntries(entries []FileEntry) []FileNode {
 }
 
 func flattenTree(root FileNode, expanded map[string]bool) []FileNode {
-	if !root.IsDir || !expanded[root.Path] {
+	if !root.IsDir {
+		return []FileNode{root}
+	}
+	// Show root node at depth -1 (not rendered in file panel) then its children.
+	// The root is the "current directory" which isn't shown as a row.
+	if !expanded[root.Path] {
 		return nil
 	}
 	var result []FileNode
