@@ -85,13 +85,3 @@ def git_diff(commit_hash: str) -> dict:
         return {"status": "ok", "diff": res.stdout}
     except Exception as e:
         return {"status": "error", "message": str(e)}
-
-def git_branch() -> str:
-    try:
-        res = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True, timeout=2
-        )
-        return res.stdout.strip() if res.returncode == 0 else ""
-    except Exception:
-        return ""
