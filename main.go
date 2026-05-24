@@ -1423,10 +1423,24 @@ func renderPanel(title string, width, height int, active bool, theme Theme, cont
 		for i := 0; i < innerHeight; i++ {
 			if i < len(lines) {
 				line := lines[i]
-				if lipgloss.Width(line) > innerWidth {
-					line = line[:innerWidth]
+				visWidth := lipgloss.Width(line)
+				if visWidth > innerWidth {
+					// Truncate by visible width, preserving ANSI sequences
+					plain := stripANSI(line)
+					truncPlain := ""
+					w := 0
+					for _, r := range plain {
+						rw := lipgloss.Width(string(r))
+						if w+rw > innerWidth {
+							break
+						}
+						w += rw
+						truncPlain += string(r)
+					}
+					line = truncPlain
+					visWidth = w
 				}
-				processed = append(processed, line+strings.Repeat(" ", innerWidth-lipgloss.Width(line)))
+				processed = append(processed, line+strings.Repeat(" ", innerWidth-visWidth))
 			} else {
 				processed = append(processed, strings.Repeat(" ", innerWidth))
 			}
