@@ -1679,9 +1679,9 @@ func renderHelp(width, height int, theme Theme) string {
 		"  AI Developer Mode              Terminal",
 		"    Ctrl+L    Cycle Layouts         Enter     Run Command",
 		"    Alt+1     Launch Claude         Up/Down   History",
-		"    Alt+2     Launch Codex          Ctrl+K    Clear (Reg)",
-		"    Alt+3     Launch Gemini         Ctrl+K    Clear (AI)",
-		"    Alt+4     Launch Aider          Ctrl+L    Cycle Layouts",
+		"    Alt+2     Launch Codex          Ctrl+L    Clear Term",
+		"    Alt+3     Launch Gemini         Ctrl+L    Clear AI",
+		"    Alt+4     Launch Aider",
 		"    Alt+5     Custom Agent",
 		"",
 		"  Context Injection              General",
@@ -2019,7 +2019,7 @@ func (m model) View() string {
 	// Overlays
 	if m.overlayMode != "" {
 		overlay := lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
-			renderOverlay(m.overlayMode, m.overlayInput, m.overlayTitle, t),
+			renderOverlay(m.overlayMode, m.overlayInput, m.overlayTitle, t, m.width),
 		)
 		return overlay
 	}
@@ -2032,8 +2032,14 @@ func (m model) View() string {
 	return finalView
 }
 
-func renderOverlay(mode, input, title string, theme Theme) string {
-	width := 44
+func renderOverlay(mode, input, title string, theme Theme, screenWidth int) string {
+	width := screenWidth / 3
+	if width < 44 {
+		width = 44
+	}
+	if width > 80 {
+		width = 80
+	}
 	if title == "" {
 		title = "Enter value:"
 	}
