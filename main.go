@@ -485,18 +485,22 @@ func (m *model) injectContextFilePath() tea.Cmd {
 
 // updateCursorPos updates the tracked cursor line and column from the textarea.
 func (m *model) updateCursorPos() {
-	// The bubbles textarea tracks cursor internally via character offset.
-	// We approximate cursorLine from the textarea.Line() method.
 	content := m.textarea.Value()
 	lines := strings.Split(content, "\n")
-	if m.textarea.Line() < len(lines) {
-		m.cursorLine = m.textarea.Line()
-		cursorLine := lines[m.cursorLine]
-		// Approximate column from character offset within the line
-		// For simplicity, use the line width
-		m.cursorCol = len(cursorLine)
+	lineIdx := m.textarea.Line()
+	if lineIdx < 0 {
+		lineIdx = 0
 	}
-}
+	if lineIdx < len(lines) {
+		m.cursorLine = lineIdx
+		m.cursorCol = len(lines[lineIdx])
+	} else if len(lines) > 0 {
+		m.cursorLine = len(lines) - 1
+		m.cursorCol = len(lines[len(lines)-1])
+	} else {
+		m.cursorLine = 0
+		m.cursorCol = 0
+	}
 
 func (m *model) injectContextSelection() tea.Cmd {
 	if m.currentPath == "" {
@@ -1256,8 +1260,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, cmd
 					} else {
 						m.terminalHistory = history
-						// Show the command prompt in the buffer
-						m.terminalBuf.WriteString("\n> " + input + "\n")
+						// Don't echo locally - the persistent shell echoes the command + prompt back
 						// Send to persistent shell via streaming terminal_write
 						cmd := terminalWrite(m.bridge, input+"\n")
 						m.terminalInput = ""
@@ -1338,11 +1341,55 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		
-		editorW := (m.width * 45) / 100
-		innerEditorW := editorW - 2
+		// Calculate editor width based on layout mode
+		var editorW int
+		switch m.layoutMode {
+		case 0: // Classic
+			filesW := (m.width * 20) / 100
+			if m.filesWidth > 0 {
+				filesW = m.filesWidth
+			}
+			if !m.fileTreeVisible {
+				filesW = 0
+			}
+			gap := 1
+			terminalW := (m.width - filesW - gap*2) / 2
+			if terminalW < 10 {
+				terminalW = 10
+			}
+			editorW = m.width - filesW - terminalW - gap*2
+			if m.editorWidth > 0 {
+				editorW = m.editorWidth
+			}
+		case 1: // AI Developer
+			editorW = (m.width * 60) / 100
+			if m.editorWidth > 0 {
+				editorW = m.editorWidth
+			}
+		case 2: // Focus - full width
+			editorW = m.width
+		case 3: // Terminal Focus
+			editorW = (m.width * 40) / 100
+			if m.editorWidth > 0 {
+				editorW = m.editorWidth
+			}
+		default:
+			editorW = (m.width * 45) / 100
+		}
+		
+		innerEditorW := editorW - 6 // room for line numbers + gutter
+		if innerEditorW < 10 {
+			innerEditorW = 10
+		}
 		mainH := m.height - 4
+		if mainH < 0 {
+			mainH = 0
+		}
 		m.textarea.SetWidth(innerEditorW)
 		m.textarea.SetHeight(mainH - 2)
+		if m.textarea.Height() < 1 {
+			m.textarea.SetHeight(1)
+		}
 	}
 	return m, tea.Batch(cmds...)
 }
