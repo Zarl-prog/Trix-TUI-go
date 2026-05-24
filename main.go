@@ -171,6 +171,7 @@ type model struct {
 
 func initialModel() model {
 	cfg := loadConfig()
+	cwd, _ := os.Getwd()
 	
 	theme := AyuDark
 	for _, t := range Themes {
@@ -207,10 +208,11 @@ func initialModel() model {
 		active:            "files",
 		currentFolder:     filepath.Base(cwd),
 		currentTheme:      theme,
-		themeIdx:          themeIdx,			textarea:          ta,
-			undoStack:         []string{},
-			redoStack:         []string{},
-			maxUndo:           100,
+		themeIdx:          themeIdx,
+		textarea:          ta,
+		undoStack:         []string{},
+		redoStack:         []string{},
+		maxUndo:           100,
 		terminalBuf:       &strings.Builder{},
 		terminalHistIdx:   -1,
 		aiTerminalBuf:     &strings.Builder{},
@@ -501,6 +503,7 @@ func (m *model) updateCursorPos() {
 		m.cursorLine = 0
 		m.cursorCol = 0
 	}
+}
 
 func (m *model) injectContextSelection() tea.Cmd {
 	if m.currentPath == "" {
@@ -1215,8 +1218,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "editor":
 			// Save content for undo only on content-modifying keys
-			switch msg.String() {
-				}
 			prev := m.textarea.Value()
 			var cmd tea.Cmd
 			m.textarea, cmd = m.textarea.Update(msg)
@@ -2618,8 +2619,7 @@ func saveConfig(themeName string, layoutMode int) {
 }
 
 func main() {
-	m := initialModel()
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	finalModel, err := p.Run()
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -2627,10 +2627,8 @@ func main() {
 	}
 	// Cleanup: close the Python bridge process
 	if finalModel != nil {
-		if m2, ok := finalModel.(model); ok {
-			if m2.bridge != nil {
-				m2.bridge.Close()
-			}
+		if m, ok := finalModel.(model); ok && m.bridge != nil {
+			m.bridge.Close()
 		}
 	}
 }
