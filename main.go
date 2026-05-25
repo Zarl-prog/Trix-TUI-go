@@ -59,6 +59,24 @@ type gitBranchMsg struct {
 	Error  string
 }
 
+type GitCommit struct {
+	Hash     string `json:"hash"`
+	Message  string `json:"message"`
+	Author   string `json:"author"`
+	Time     string `json:"time"`
+	FullHash string `json:"full_hash"`
+}
+
+type gitLogMsg struct {
+	Commits []GitCommit
+	Error   string
+}
+
+type gitShowMsg struct {
+	Output string
+	Error  string
+}
+
 type searchResultsMsg struct {
 	Results []GlobalResult
 	Error   string
@@ -680,6 +698,13 @@ type model struct {
 	globalSearchResults []GlobalResult
 	globalSearchIdx     int
 	
+	// Git Log
+	gitLogOpen          bool
+	gitLogCommits       []GitCommit
+	gitLogIdx           int
+	gitDetailedVisible  bool
+	gitDetailedContent  string
+
 	// Layout modes: 0=Classic (default), 1=AI Developer, 2=Focus, 3=Terminal Focus
 	layoutMode        int
 	
@@ -877,6 +902,44 @@ func fetchGitBranch(b *Bridge, path string) tea.Cmd {
 			return gitBranchMsg{Error: data.Message}
 		}
 		return gitBranchMsg{Branch: data.Branch, Dirty: data.Dirty}
+	}
+}
+
+func fetchGitLog(b *Bridge) tea.Cmd {
+	return func() tea.Msg {
+		res, err := b.Call("git_log", map[string]interface{}{"limit": 50})
+		if err != nil {
+			return gitLogMsg{Error: err.Error()}
+		}
+		var data struct {
+			Status  string      `json:"status"`
+			Commits []GitCommit `json:"commits"`
+			Message string      `json:"message"`
+		}
+		json.Unmarshal(res, &data)
+		if data.Status == "error" {
+			return gitLogMsg{Error: data.Message}
+		}
+		return gitLogMsg{Commits: data.Commits}
+	}
+}
+
+func fetchGitShow(b *Bridge, hash string) tea.Cmd {
+	return func() tea.Msg {
+		res, err := b.Call("git_show", map[string]interface{}{"hash": hash})
+		if err != nil {
+			return gitShowMsg{Error: err.Error()}
+		}
+		var data struct {
+			Status  string `json:"status"`
+			Output  string `json:"output"`
+			Message string `json:"message"`
+		}
+		json.Unmarshal(res, &data)
+		if data.Status == "error" {
+			return gitShowMsg{Error: data.Message}
+		}
+		return gitShowMsg{Output: data.Output}
 	}
 }
 
@@ -1221,6 +1284,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.globalSearchIdx = 0
 		}
 
+	case gitLogMsg:
+		if msg.Error == "" {
+			m.gitLogCommits = msg.Commits
+			m.gitLogOpen = true
+			m.gitLogIdx = 0
+		} else {
+			m.statusMsg = "Git log error: " + msg.Error
+			m.isError = true
+		}
+
+	case gitShowMsg:
+		if msg.Error == "" {
+			m.gitDetailedContent = msg.Output
+			m.gitDetailedVisible = true
+		} else {
+			m.statusMsg = "Git show error: " + msg.Error
+			m.isError = true
+		}
+
 	case RPCEvent:
 		if msg.Event == "terminal_data" {
 			var data struct {
@@ -1239,6 +1321,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.String() == "f1" || msg.String() == "esc" {
 				m.helpOpen = false
 				return m, nil
+			}
+			return m, nil
+		}
+
+		// Git Log View
+		if m.gitDetailedVisible {
+			if msg.String() == "esc" {
+				m.gitDetailedVisible = false
+				m.gitDetailedContent = ""
+				return m, nil
+			}
+			return m, nil
+		}
+
+		if m.gitLogOpen {
+			switch msg.String() {
+			case "esc":
+				m.gitLogOpen = false
+				m.gitLogCommits = nil
+				return m, nil
+			case "up", "ctrl+p":
+				if m.gitLogIdx > 0 {
+					m.gitLogIdx--
+				}
+				return m, nil
+			case "down", "ctrl+n":
+				if m.gitLogIdx < len(m.gitLogCommits)-1 {
+					m.gitLogIdx++
+				}
+				return m, nil
+			case "enter":
+				if len(m.gitLogCommits) > 0 {
+					commit := m.gitLogCommits[m.gitLogIdx]
+					return m, fetchGitShow(m.bridge, commit.Hash)
+				}
 			}
 			return m, nil
 		}
@@ -1434,7 +1551,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+2":
 			if m.editorVisible {
 				m.active = "editor"
-				m.textarea.Focus()
 			} else {
 				m.statusMsg = "Editor panel hidden"
 				m.isError = true
@@ -1443,7 +1559,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+3":
 			if m.terminalVisible {
 				m.active = "terminal"
-				m.textarea.Blur()
 			} else {
 				m.statusMsg = "Terminal panel hidden"
 				m.isError = true
@@ -1475,7 +1590,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.fileTreeVisible && m.active == "files" {
 				if m.editorVisible {
 					m.active = "editor"
-					m.textarea.Focus()
 				} else if m.terminalVisible {
 					m.active = "terminal"
 				}
@@ -1485,21 +1599,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.editorVisible && m.active == "editor" {
 				if m.terminalVisible {
 					m.active = "terminal"
-					m.textarea.Blur()
 				} else if m.fileTreeVisible {
 					m.active = "files"
-					m.textarea.Blur()
 				}
 			} else if m.editorVisible && m.active != "files" && !m.terminalVisible {
 				m.active = "editor"
-				m.textarea.Focus()
 			}
 		case "f4":
 			m.terminalVisible = !m.terminalVisible
 			if !m.terminalVisible && m.active == "terminal" {
 				if m.editorVisible {
 					m.active = "editor"
-					m.textarea.Focus()
 				} else if m.fileTreeVisible {
 					m.active = "files"
 				}
@@ -1507,28 +1617,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.active = "terminal"
 			}
 		case "ctrl+z":
-			if len(m.undoStack) > 0 {
-				current := m.textarea.Value()
-				m.redoStack = append(m.redoStack, current)
-				prev := m.undoStack[len(m.undoStack)-1]
-				m.undoStack = m.undoStack[:len(m.undoStack)-1]
-				m.textarea.SetValue(prev)
-				m.hasChanges = true
-				m.statusMsg = "Undo"
-				m.isError = false
-			}
+			m.editor.undo()
 			return m, nil
 		case "ctrl+y":
-			if len(m.redoStack) > 0 {
-				current := m.textarea.Value()
-				m.undoStack = append(m.undoStack, current)
-				next := m.redoStack[len(m.redoStack)-1]
-				m.redoStack = m.redoStack[:len(m.redoStack)-1]
-				m.textarea.SetValue(next)
-				m.hasChanges = true
-				m.statusMsg = "Redo"
-				m.isError = false
-			}
+			m.editor.redo()
 			return m, nil
 		case "ctrl+\\":
 			m.zenMode = !m.zenMode
@@ -1569,6 +1661,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.currentTheme = Themes[m.themeIdx]
 			saveConfig(m.currentTheme.Name, m.layoutMode)
 			return m, nil
+		case "ctrl+g":
+			return m, fetchGitLog(m.bridge)
 		
 		// --- AI Agent Launcher (Alt+1..5) ---
 		case "alt+1":
@@ -1621,7 +1715,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.MouseMsg:
-		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && m.overlayMode == "" && !m.helpOpen && !m.globalSearchOpen {
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			if m.gitLogOpen && !m.gitDetailedVisible {
+				// Simple mouse selection for git log
+				logHeight := 20
+				if logHeight > m.height-4 { logHeight = m.height - 4 }
+				startY := (m.height - logHeight) / 2
+				if msg.Y >= startY+3 && msg.Y < startY+3+len(m.gitLogCommits) && msg.Y < startY+logHeight-2 {
+					m.gitLogIdx = msg.Y - (startY + 3)
+					commit := m.gitLogCommits[m.gitLogIdx]
+					return m, fetchGitShow(m.bridge, commit.Hash)
+				}
+			}
+		}
+
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && m.overlayMode == "" && !m.helpOpen && !m.globalSearchOpen && !m.gitLogOpen && !m.gitDetailedVisible {
 			// Calculate layout dimensions for mouse handling
 			gap := 1
 			filesW := m.width / 5
@@ -1684,7 +1792,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 									m.statusMsg = "Custom AI agent selected. Type your command."
 									m.isError = false
 									m.active = "terminal"
-									m.textarea.Blur()
 									return m, nil
 								}
 							}
@@ -1692,7 +1799,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					}
 					m.active = "terminal"
-					m.textarea.Blur()
 				}
 			} else if m.layoutMode == 1 { // AI Developer
 				editorW = (m.width * 60) / 100
@@ -2431,6 +2537,7 @@ func renderHelp(width, height int, theme Theme) string {
 		"    Ctrl+3    Terminal / AI Panel",
 		"    Ctrl+F    Inline Search",
 		"    Ctrl+Shift+F  Global Search",
+		"    Ctrl+G    Git History",
 		"",
 		"  [F1/Esc] Close Help",
 	}
@@ -2498,6 +2605,85 @@ func renderGlobalSearch(width int, theme Theme, query string, results []GlobalRe
 // ==============================================================================
 // Main View
 // ==============================================================================
+
+func renderGitLog(width, height int, theme Theme, commits []GitCommit, idx int) string {
+	logHeight := 20
+	if logHeight > height-4 { logHeight = height - 4 }
+	logWidth := 80
+	if logWidth > width-4 { logWidth = width - 4 }
+
+	var content strings.Builder
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Accent)).Bold(true)
+	content.WriteString(titleStyle.Render(" Git Commit History ") + "\n\n")
+
+	if len(commits) == 0 {
+		content.WriteString("  No commits found or not a git repo.")
+	} else {
+		maxCommits := logHeight - 5
+		start := 0
+		if idx >= maxCommits { start = idx - maxCommits + 1 }
+
+		for i := start; i < start+maxCommits && i < len(commits); i++ {
+			c := commits[i]
+			line := fmt.Sprintf(" %s  %-20s  %s", c.Hash, c.Author, c.Message)
+			if lipgloss.Width(line) > logWidth-4 {
+				line = line[:logWidth-7] + "..."
+			}
+
+			style := lipgloss.NewStyle()
+			if i == idx {
+				style = style.Background(lipgloss.Color(theme.Accent)).Foreground(lipgloss.Color(theme.Background))
+			} else {
+				style = style.Foreground(lipgloss.Color(theme.Text))
+			}
+			content.WriteString(style.Render(line) + "\n")
+		}
+	}
+
+	footer := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.TextMuted)).Render("\n [Enter] details   [Esc] close   [↑/↓] navigate")
+	content.WriteString(footer)
+
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center,
+		lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color(theme.Accent)).
+			Background(lipgloss.Color(theme.Surface)).
+			Padding(1, 2).
+			Width(logWidth).
+			Render(content.String()),
+	)
+}
+
+func renderGitDetails(width, height int, theme Theme, content string) string {
+	dHeight := height - 4
+	dWidth := width - 8
+	if dWidth > 120 { dWidth = 120 }
+
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Accent)).Bold(true)
+	title := titleStyle.Render(" Commit Details ")
+
+	// Create a scrollable-like view by just showing what fits
+	lines := strings.Split(content, "\n")
+	availLines := dHeight - 6
+	if len(lines) > availLines {
+		lines = lines[:availLines]
+		lines = append(lines, "...")
+	}
+
+	body := strings.Join(lines, "\n")
+
+	footer := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.TextMuted)).Render("\n [Esc] back to log")
+
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center,
+		lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color(theme.AccentAlt)).
+			Background(lipgloss.Color(theme.Surface)).
+			Padding(1, 2).
+			Width(dWidth).
+			Render(title + "\n\n" + body + footer),
+	)
+}
 
 func (m model) View() string {
 	if m.width == 0 || m.height == 0 {
@@ -2641,8 +2827,7 @@ func (m model) View() string {
 			if len(panels) > 0 {
 				panels = append(panels, divStyle)
 			}
-			editorContent := m.textarea.Value()
-			editorView := renderEditorView(editorContent, m.currentLang, t, m.cursorLine, m.cursorCol, editorW-2, mainH-2, m.cursorVisible, m.active == "editor")
+			editorView := renderEditorView(&m.editor, m.currentLang, t, editorW-2, mainH-2, m.cursorVisible)
 			if m.searchOpen {
 				matchInfo := ""
 				if len(m.searchMatches) > 0 {
@@ -2697,8 +2882,7 @@ func (m model) View() string {
 		m.fileTreeVisible = false
 		m.editorVisible = true
 		m.terminalVisible = false
-		editorContent := m.textarea.Value()
-		editorView := renderEditorView(editorContent, m.currentLang, t, m.cursorLine, m.cursorCol, m.width-2, mainH-2, m.cursorVisible, true)
+		editorView := renderEditorView(&m.editor, m.currentLang, t, m.width-2, mainH-2, m.cursorVisible)
 		if m.searchOpen {
 			matchInfo := ""
 			if len(m.searchMatches) > 0 {
@@ -2743,10 +2927,6 @@ func (m model) View() string {
 	// --- 3. STATUS BAR ---
 	statusBrand := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)).Bold(true).Background(lipgloss.Color(t.SurfaceAlt)).Padding(0, 1).Render("TRIX")
 	
-	// Layout name in status bar
-	layoutNames := []string{"Layout: Classic", "Layout: AI Dev", "Layout: Focus", "Layout: Term Focus"}
-	layoutInfo := lipgloss.NewStyle().Foreground(lipgloss.Color(t.AccentAlt)).Background(lipgloss.Color(t.SurfaceAlt)).Render(" " + layoutNames[m.layoutMode] + " ")
-	
 	// Active AI agent indicator
 	agentInfo := ""
 	if m.aiAgentName != "" {
@@ -2789,7 +2969,6 @@ func (m model) View() string {
 	}
 
 	// Active AI agent indicator
-	agentInfo := ""
 	if m.aiAgentName != "" && (m.layoutMode == 1 || m.layoutMode == 3) {
 		animIndicator := ""
 		if m.aiAgentAnimTick {
@@ -2809,11 +2988,11 @@ func (m model) View() string {
 	// Right: keyboard hints
 	var pills string
 	if m.layoutMode == 0 {
-		pills = lipgloss.NewStyle().Background(lipgloss.Color(t.SurfaceAlt)).Foreground(lipgloss.Color(t.TextMuted)).Padding(0, 1).Render("^1 Files  ^2 Editor  ^3 Term  ^S Save  ^Q Quit")
+		pills = lipgloss.NewStyle().Background(lipgloss.Color(t.SurfaceAlt)).Foreground(lipgloss.Color(t.TextMuted)).Padding(0, 1).Render("^1 Files  ^2 Editor  ^3 Term  ^S Save  ^G Git  ^Q Quit")
 	} else if m.layoutMode == 1 || m.layoutMode == 3 {
-		pills = lipgloss.NewStyle().Background(lipgloss.Color(t.SurfaceAlt)).Foreground(lipgloss.Color(t.TextMuted)).Padding(0, 1).Render("Alt+Enter  Alt+F  Alt+1-5  ^L Layout")
+		pills = lipgloss.NewStyle().Background(lipgloss.Color(t.SurfaceAlt)).Foreground(lipgloss.Color(t.TextMuted)).Padding(0, 1).Render("Alt+Enter  Alt+F  Alt+1-5  ^L Layout  ^G Git")
 	} else {
-		pills = lipgloss.NewStyle().Background(lipgloss.Color(t.SurfaceAlt)).Foreground(lipgloss.Color(t.TextMuted)).Padding(0, 1).Render("^2 Editor  ^L Layout  ^S Save  ^Q Quit")
+		pills = lipgloss.NewStyle().Background(lipgloss.Color(t.SurfaceAlt)).Foreground(lipgloss.Color(t.TextMuted)).Padding(0, 1).Render("^2 Editor  ^L Layout  ^S Save  ^G Git  ^Q Quit")
 	}
 
 	leftWidth := lipgloss.Width(statusBrand) + lipgloss.Width(fileInfo) + lipgloss.Width(gitInfo) + lipgloss.Width(langInfo) + lipgloss.Width(cursorInfo) + lipgloss.Width(agentInfo)
@@ -2846,6 +3025,14 @@ func (m model) View() string {
 	// Global search overlay
 	if m.globalSearchOpen {
 		return renderGlobalSearch(m.width, t, m.globalSearchQuery, m.globalSearchResults, m.globalSearchIdx)
+	}
+
+	// Git Log overlay
+	if m.gitDetailedVisible {
+		return renderGitDetails(m.width, m.height, t, m.gitDetailedContent)
+	}
+	if m.gitLogOpen {
+		return renderGitLog(m.width, m.height, t, m.gitLogCommits, m.gitLogIdx)
 	}
 
 	finalView := lipgloss.JoinVertical(lipgloss.Left, header, mainArea, footer)
