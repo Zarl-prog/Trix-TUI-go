@@ -63,6 +63,7 @@ HANDLERS = {
     "git_diff":    lambda r: git.git_diff(r.get("hash")),
     "run_command": lambda r: shell.run_command(r.get("command"), r.get("cwd")),
     "get_git_branch": lambda r: get_git_branch(r.get("path", ".")),
+    "fuzzy_list_files": lambda r: files.fuzzy_list_files(r.get("root", ".")),
     "search_files":   lambda r: search_files(r.get("root", "."), r.get("query", "")),
     "start_terminal": lambda r: start_terminal(r),
     "terminal_write": lambda r: terminal_write(r),

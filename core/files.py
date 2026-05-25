@@ -77,6 +77,30 @@ def get_cwd() -> dict:
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+def fuzzy_list_files(root: str) -> dict:
+    try:
+        root = sanitize_path(root)
+        results = []
+        for p in Path(root).rglob("*"):
+            if p.is_file():
+                # Exclude common ignore patterns
+                skip = False
+                for part in p.parts:
+                    if part.startswith(".") or part in ["node_modules", "__pycache__", "venv", ".git"]:
+                        if part == ".gitignore" or part == ".env": # Allow some hidden files
+                            continue
+                        skip = True
+                        break
+                if skip:
+                    continue
+                try:
+                    results.append(str(p.relative_to(root)))
+                except ValueError:
+                    results.append(str(p))
+        return {"status": "ok", "files": results}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 def change_dir(path: str) -> dict:
     try:
         path = sanitize_path(path)

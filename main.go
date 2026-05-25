@@ -82,6 +82,11 @@ type searchResultsMsg struct {
 	Error   string
 }
 
+type fuzzyFilesMsg struct {
+	Files []string
+	Error string
+}
+
 // ==============================================================================
 // Editor State
 // ==============================================================================
@@ -706,6 +711,13 @@ type model struct {
 	gitDetailedVisible  bool
 	gitDetailedContent  string
 
+	// Fuzzy Finder
+	fuzzyOpen           bool
+	fuzzyQuery          string
+	fuzzyAllFiles       []string
+	fuzzyResults        []string
+	fuzzyIdx            int
+
 	// Layout modes: 0=Classic (default), 1=AI Developer, 2=Focus, 3=Terminal Focus
 	layoutMode        int
 	
@@ -785,6 +797,25 @@ func initialModel() model {
 // ==============================================================================
 // Commands
 // ==============================================================================
+
+func fuzzyListFiles(b *Bridge, root string) tea.Cmd {
+	return func() tea.Msg {
+		res, err := b.Call("fuzzy_list_files", map[string]interface{}{"root": root})
+		if err != nil {
+			return fuzzyFilesMsg{Error: err.Error()}
+		}
+		var data struct {
+			Status  string   `json:"status"`
+			Files   []string `json:"files"`
+			Message string   `json:"message"`
+		}
+		json.Unmarshal(res, &data)
+		if data.Status == "error" {
+			return fuzzyFilesMsg{Error: data.Message}
+		}
+		return fuzzyFilesMsg{Files: data.Files}
+	}
+}
 
 func listDir(b *Bridge, path string) tea.Cmd {
 	return func() tea.Msg {
@@ -962,6 +993,20 @@ func searchFiles(b *Bridge, root, query string) tea.Cmd {
 		}
 		return searchResultsMsg{Results: data.Results}
 	}
+}
+
+func filterFuzzy(files []string, query string) []string {
+	if query == "" {
+		return files
+	}
+	var results []string
+	q := strings.ToLower(query)
+	for _, f := range files {
+		if strings.Contains(strings.ToLower(f), q) {
+			results = append(results, f)
+		}
+	}
+	return results
 }
 
 func findMatches(content, query string) []SearchMatch {
@@ -1346,6 +1391,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.globalSearchIdx = 0
 		}
 
+	case fuzzyFilesMsg:
+		if msg.Error == "" {
+			m.fuzzyAllFiles = msg.Files
+			m.fuzzyResults = msg.Files
+			m.fuzzyIdx = 0
+		}
+
 	case gitLogMsg:
 		if msg.Error == "" {
 			m.gitLogCommits = msg.Commits
@@ -1420,6 +1472,48 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return m, nil
+		}
+
+		// Fuzzy Finder mode
+		if m.fuzzyOpen {
+			switch msg.String() {
+			case "enter":
+				if len(m.fuzzyResults) > 0 && m.fuzzyIdx < len(m.fuzzyResults) {
+					path := m.fuzzyResults[m.fuzzyIdx]
+					m.fuzzyOpen = false
+					m.fuzzyQuery = ""
+					return m, readFile(m.bridge, path)
+				}
+			case "esc":
+				m.fuzzyOpen = false
+				m.fuzzyQuery = ""
+				m.fuzzyResults = nil
+				return m, nil
+			case "up", "ctrl+p":
+				if m.fuzzyIdx > 0 {
+					m.fuzzyIdx--
+				}
+				return m, nil
+			case "down", "ctrl+n":
+				if m.fuzzyIdx < len(m.fuzzyResults)-1 {
+					m.fuzzyIdx++
+				}
+				return m, nil
+			case "backspace":
+				if len(m.fuzzyQuery) > 0 {
+					m.fuzzyQuery = m.fuzzyQuery[:len(m.fuzzyQuery)-1]
+					m.fuzzyResults = filterFuzzy(m.fuzzyAllFiles, m.fuzzyQuery)
+					m.fuzzyIdx = 0
+				}
+				return m, nil
+			default:
+				if len(msg.String()) == 1 {
+					m.fuzzyQuery += msg.String()
+					m.fuzzyResults = filterFuzzy(m.fuzzyAllFiles, m.fuzzyQuery)
+					m.fuzzyIdx = 0
+				}
+				return m, nil
+			}
 		}
 
 		// Zen mode - only ctrl+\ to exit, everything else passes through
@@ -1721,6 +1815,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.globalSearchQuery = ""
 			m.globalSearchResults = nil
 			m.globalSearchIdx = 0
+		case "ctrl+p":
+			m.fuzzyOpen = true
+			m.fuzzyQuery = ""
+			m.fuzzyResults = nil
+			m.fuzzyIdx = 0
+			cwd, _ := os.Getwd()
+			return m, fuzzyListFiles(m.bridge, cwd)
 		case "f1":
 			m.helpOpen = !m.helpOpen
 		case "f2":
@@ -2677,6 +2778,57 @@ func renderHelp(width, height int, theme Theme) string {
 // Search Overlay
 // ==============================================================================
 
+func renderFuzzyFinder(width, height int, theme Theme, query string, results []string, idx int) string {
+	fHeight := 16
+	if fHeight > height-4 { fHeight = height - 4 }
+	fWidth := 60
+	if fWidth > width-8 { fWidth = width - 8 }
+
+	var content strings.Builder
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Accent)).Bold(true)
+	content.WriteString(titleStyle.Render(" Go to File ") + "\n\n")
+
+	searchStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Text)).Background(lipgloss.Color(theme.Background)).Padding(0, 1)
+	content.WriteString(searchStyle.Render("> " + query + "█") + "\n\n")
+
+	if len(results) == 0 {
+		content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(theme.TextMuted)).Render("  No matching files"))
+	} else {
+		maxVisible := fHeight - 8
+		start := 0
+		if idx >= maxVisible { start = idx - maxVisible + 1 }
+
+		for i := start; i < start+maxVisible && i < len(results); i++ {
+			res := results[i]
+			style := lipgloss.NewStyle().Padding(0, 1)
+			if i == idx {
+				style = style.Background(lipgloss.Color(theme.Accent)).Foreground(lipgloss.Color(theme.Background))
+			} else {
+				style = style.Foreground(lipgloss.Color(theme.Text))
+			}
+
+			display := res
+			if lipgloss.Width(display) > fWidth-4 {
+				display = "..." + display[len(display)-(fWidth-7):]
+			}
+			content.WriteString(style.Render(display) + "\n")
+		}
+	}
+
+	footer := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.TextMuted)).Render("\n [Enter] open   [Esc] close   [↑/↓] navigate")
+	content.WriteString(footer)
+
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center,
+		lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color(theme.Accent)).
+			Background(lipgloss.Color(theme.Surface)).
+			Padding(1, 2).
+			Width(fWidth).
+			Render(content.String()),
+	)
+}
+
 func renderGlobalSearch(width int, theme Theme, query string, results []GlobalResult, idx int) string {
 	sHeight := 12
 	if sHeight > width/3 { sHeight = width / 3 }
@@ -3148,6 +3300,11 @@ func (m model) View() string {
 			renderOverlay(m.overlayMode, m.overlayInput, m.overlayTitle, t, m.width),
 		)
 		return overlay
+	}
+
+	// Fuzzy Finder overlay
+	if m.fuzzyOpen {
+		return renderFuzzyFinder(m.width, m.height, t, m.fuzzyQuery, m.fuzzyResults, m.fuzzyIdx)
 	}
 
 	// Global search overlay
