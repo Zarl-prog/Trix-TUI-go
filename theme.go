@@ -84,4 +84,25 @@ var AyuMirage = Theme{
 	Selection:      "#3d4251",
 }
 
-var Themes = []Theme{AyuDark, SeaGreen, AyuMirage}
+var Dracula = Theme{
+	Name:           "Dracula",
+	Background:     "#282a36",
+	Surface:        "#44475a",
+	SurfaceAlt:     "#191a21",
+	Border:         "#6272a4",
+	BorderFocused:  "#bd93f9",
+	Text:           "#f8f8f2",
+	TextMuted:      "#6272a4",
+	Accent:         "#bd93f9",
+	AccentAlt:      "#ff79c6",
+	Success:        "#50fa7b",
+	Warning:        "#ffb86c",
+	Error:          "#ff5555",
+	CursorLine:     "#44475a",
+	LineNumber:     "#6272a4",
+	Scrollbar:      "#44475a",
+	ScrollbarThumb: "#bd93f9",
+	Selection:      "#44475a",
+}
+
+var Themes = []Theme{AyuDark, SeaGreen, AyuMirage, Dracula}
