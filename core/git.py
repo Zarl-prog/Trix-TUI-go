@@ -1,6 +1,4 @@
 import subprocess
-import os
-from .utils import sanitize_path
 
 def git_status() -> dict:
     try:
