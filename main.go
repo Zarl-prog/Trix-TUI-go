@@ -659,7 +659,8 @@ type model struct {
 	themeIdx        int
 	
 	// Editor (custom full-feature text editor)
-	editor          EditorState
+	editors         []EditorState
+	activeTab       int
 	
 	// Files
 	rootNode        FileNode
@@ -765,7 +766,8 @@ func initialModel() model {
 		currentFolder:     filepath.Base(cwd),
 		currentTheme:      theme,
 		themeIdx:          themeIdx,
-		editor:            newEditorState(),
+		editors:           []EditorState{newEditorState()},
+		activeTab:         0,
 		terminalBuf:       &strings.Builder{},
 		terminalHistIdx:   -1,
 		aiTerminalBuf:     &strings.Builder{},
@@ -1096,12 +1098,12 @@ func (m *model) injectContextSelection() tea.Cmd {
 		m.isError = true
 		return nil
 	}
-	content := m.editor.content()
+	content := m.editors[m.activeTab].content()
 	fname := filepath.Base(m.currentPath)
 	contextText := "Here is the current file (" + fname + "):"
 
 	lines := strings.Split(content, "\n")
-	cursorLine := m.editor.cursorRow
+	cursorLine := m.editors[m.activeTab].cursorRow
 	if cursorLine < len(lines) {
 		start := cursorLine - 3
 		if start < 0 { start = 0 }
@@ -1130,7 +1132,7 @@ func (m *model) injectContextFullFile() tea.Cmd {
 		return nil
 	}
 	fname := filepath.Base(m.currentPath)
-	content := m.editor.content()
+	content := m.editors[m.activeTab].content()
 	contextText := "Here is my current file (" + fname + "):\n" + content + "\n\nPlease help me with:"
 
 	if m.layoutMode == 0 {
@@ -1143,6 +1145,43 @@ func (m *model) injectContextFullFile() tea.Cmd {
 	m.isError = false
 	m.active = "terminal"
 	return nil
+}
+
+func (m *model) handleEditorClick(x, y, editorStart, editorW int) {
+	// Editor area is within panel borders
+	innerX := x - editorStart - 1
+	innerY := y - 3 // Adjust for header and top border
+
+	if innerY < 0 || innerY >= m.editors[m.activeTab].visibleH {
+		return
+	}
+
+	lineNumWidth := 3
+	if len(m.editors[m.activeTab].lines) >= 100 {
+		lineNumWidth = 4
+	}
+	if len(m.editors[m.activeTab].lines) >= 1000 {
+		lineNumWidth = 5
+	}
+
+	// Adjust for gutter and line numbers
+	contentX := innerX - lineNumWidth - 2
+	if contentX < 0 {
+		contentX = 0
+	}
+
+	targetRow := m.editors[m.activeTab].scrollTop + innerY
+	if targetRow >= len(m.editors[m.activeTab].lines) {
+		targetRow = len(m.editors[m.activeTab].lines) - 1
+	}
+	if targetRow < 0 {
+		targetRow = 0
+	}
+
+	m.editors[m.activeTab].cursorRow = targetRow
+	m.editors[m.activeTab].cursorCol = contentX
+	m.editors[m.activeTab].safeCol()
+	m.editors[m.activeTab].clearSelection()
 }
 
 // ==============================================================================
@@ -1241,7 +1280,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "Read error: " + msg.Error
 			m.isError = true
 		} else {
-			m.editor.loadFile(msg.Path, msg.Content)
+			// Check if file is already open in a tab
+			found := -1
+			for i, ed := range m.editors {
+				if ed.filePath == msg.Path {
+					found = i
+					break
+				}
+			}
+
+			if found != -1 {
+				m.activeTab = found
+			} else {
+				// Open in new tab or reuse empty tab
+				if len(m.editors) == 1 && m.editors[0].filePath == "" && !m.editors[0].modified {
+					m.editors[0].loadFile(msg.Path, msg.Content)
+					m.activeTab = 0
+				} else {
+					newEd := newEditorState()
+					newEd.loadFile(msg.Path, msg.Content)
+					m.editors = append(m.editors, newEd)
+					m.activeTab = len(m.editors) - 1
+				}
+			}
+
 			m.currentPath = msg.Path
 			m.currentLang = detectLanguage(msg.Path)
 			m.active = "editor"
@@ -1256,7 +1318,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.statusMsg = "Saved " + filepath.Base(m.currentPath)
 			m.isError = false
-			m.editor.modified = false
+			m.editors[m.activeTab].modified = false
 			cwd2, _ := os.Getwd()
 			cmds = append(cmds, listDir(m.bridge, cwd2))
 		}
@@ -1447,14 +1509,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "backspace":
 				if len(m.searchQuery) > 0 {
 					m.searchQuery = m.searchQuery[:len(m.searchQuery)-1]
-					m.searchMatches = findMatches(m.editor.content(), m.searchQuery)
+					m.searchMatches = findMatches(m.editors[m.activeTab].content(), m.searchQuery)
 					m.searchIdx = 0
 				}
 				return m, nil
 			default:
 				if len(msg.String()) == 1 {
 					m.searchQuery += msg.String()
-					m.searchMatches = findMatches(m.editor.content(), m.searchQuery)
+					m.searchMatches = findMatches(m.editors[m.activeTab].content(), m.searchQuery)
 					m.searchIdx = 0
 				}
 				return m, nil
@@ -1533,7 +1595,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 		case "ctrl+q":
-			if m.editor.modified {
+			if m.editors[m.activeTab].modified {
 				m.overlayMode = "quit_confirm"
 				m.overlayInput = ""
 				m.overlayTitle = "Unsaved changes. Quit anyway? (y/n)"
@@ -1566,8 +1628,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "ctrl+s":
 			if m.currentPath != "" {
-				m.editor.modified = false
-				return m, writeFile(m.bridge, m.currentPath, m.editor.content())
+				m.editors[m.activeTab].modified = false
+				return m, writeFile(m.bridge, m.currentPath, m.editors[m.activeTab].content())
 			}
 		case "ctrl+o":
 			m.overlayMode = "open_folder"
@@ -1580,10 +1642,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.overlayTitle = "New file name:"
 			return m, nil
 		case "ctrl+w":
-			m.currentPath = ""
-			m.currentLang = "Plain Text"
-			m.editor.closeFile()
-			m.statusMsg = "Closed file"
+			if len(m.editors) > 1 {
+				m.editors = append(m.editors[:m.activeTab], m.editors[m.activeTab+1:]...)
+				if m.activeTab >= len(m.editors) {
+					m.activeTab = len(m.editors) - 1
+				}
+				m.currentPath = m.editors[m.activeTab].filePath
+				m.currentLang = detectLanguage(m.currentPath)
+			} else {
+				m.currentPath = ""
+				m.currentLang = "Plain Text"
+				m.editors[m.activeTab].closeFile()
+			}
+			m.statusMsg = "Closed tab"
 			m.isError = false
 		case "ctrl+b":
 			m.fileTreeVisible = !m.fileTreeVisible
@@ -1617,18 +1688,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.active = "terminal"
 			}
 		case "ctrl+z":
-			m.editor.undo()
+			m.editors[m.activeTab].undo()
 			return m, nil
 		case "ctrl+y":
-			m.editor.redo()
+			m.editors[m.activeTab].redo()
 			return m, nil
 		case "ctrl+\\":
 			m.zenMode = !m.zenMode
+		case "alt+[":
+			if m.activeTab > 0 {
+				m.activeTab--
+				m.currentPath = m.editors[m.activeTab].filePath
+				m.currentLang = detectLanguage(m.currentPath)
+			}
+		case "alt+]":
+			if m.activeTab < len(m.editors)-1 {
+				m.activeTab++
+				m.currentPath = m.editors[m.activeTab].filePath
+				m.currentLang = detectLanguage(m.currentPath)
+			}
 		case "ctrl+f":
 			if m.currentPath != "" {
 				m.searchOpen = true
 				m.searchQuery = ""
-				m.searchMatches = findMatches(m.editor.content(), "")
+				m.searchMatches = findMatches(m.editors[m.activeTab].content(), "")
 				m.searchIdx = 0
 				m.active = "editor"
 				return m, nil
@@ -1759,8 +1842,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case msg.X < filesW:
 					m.active = "files"
 					// Click on a file row in the tree
-					if msg.Y >= 2 && msg.Y-2 < len(m.flatTree) {
-						clickedIdx := msg.Y - 2
+					if msg.Y >= 3 && msg.Y-3 < len(m.flatTree) {
+						clickedIdx := msg.Y - 3
 						m.fileCursor = clickedIdx
 						node := m.flatTree[clickedIdx]
 						if node.IsDir {
@@ -1775,6 +1858,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				case msg.X >= editorStart && msg.X < termStart:
 					m.active = "editor"
+					m.handleEditorClick(msg.X, msg.Y, editorStart, editorW2)
 				case msg.X >= termStart:
 					if msg.Y >= 2 && msg.Y <= 3 {
 						pillX := termStart + 2
@@ -1812,6 +1896,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.dragStartX = msg.X
 				case msg.X < editorW:
 					m.active = "editor"
+					m.active = "editor"
+					m.handleEditorClick(msg.X, msg.Y, 0, editorW)
+					m.handleEditorClick(msg.X, msg.Y, 0, editorW)
+					m.handleEditorClick(msg.X, msg.Y, 0, editorW)
 				case msg.X >= aiTermStart:
 					if msg.Y >= 2 && msg.Y <= 3 {
 						pillX := aiTermStart + 2
@@ -2131,9 +2219,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if mainH < 0 {
 			mainH = 0
 		}
-		m.editor.visibleH = mainH - 2
-		if m.editor.visibleH < 1 {
-			m.editor.visibleH = 1
+		m.editors[m.activeTab].visibleH = mainH - 2
+		if m.editors[m.activeTab].visibleH < 1 {
+			m.editors[m.activeTab].visibleH = 1
 		}
 	}
 	return m, tea.Batch(cmds...)
@@ -2272,6 +2360,40 @@ func getFileIcon(name string, isDir bool) string {
 	default:
 		return "\U0001F4C4"
 	}
+}
+
+func renderTabBar(m *model, width int, theme Theme) string {
+	if len(m.editors) == 0 {
+		return ""
+	}
+
+	var tabs []string
+	for i, ed := range m.editors {
+		title := ed.editorTitle()
+		if title == "Editor" && ed.filePath == "" {
+			title = "[No Name]"
+		}
+
+		style := lipgloss.NewStyle().Padding(0, 1)
+		if i == m.activeTab {
+			style = style.
+				Background(lipgloss.Color(theme.Surface)).
+				Foreground(lipgloss.Color(theme.Accent)).
+				Bold(true).
+				Underline(true)
+		} else {
+			style = style.
+				Background(lipgloss.Color(theme.Background)).
+				Foreground(lipgloss.Color(theme.TextMuted))
+		}
+		tabs = append(tabs, style.Render(fmt.Sprintf("%d:%s", i+1, title)))
+	}
+
+	bar := lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
+	if lipgloss.Width(bar) > width {
+		return bar[:width]
+	}
+	return bar
 }
 
 func renderFiles(width, height int, active bool, theme Theme, tree []FileNode, cursor int, expanded map[string]bool) string {
@@ -2694,7 +2816,7 @@ func (m model) View() string {
 
 	// --- ZEN MODE ---
 	if m.zenMode {
-		editorView := renderEditorView(&m.editor, m.currentLang, t, m.width, m.height-1, m.cursorVisible)
+		editorView := renderEditorView(&m.editors[m.activeTab], m.currentLang, t, m.width, m.height-1, m.cursorVisible)
 		hint := lipgloss.NewStyle().Foreground(lipgloss.Color(t.TextMuted)).Render(" ctrl+\\ exit zen ")
 		return editorView + "\n" + strings.Repeat(" ", m.width-lipgloss.Width(hint)) + hint
 	}
@@ -2827,7 +2949,9 @@ func (m model) View() string {
 			if len(panels) > 0 {
 				panels = append(panels, divStyle)
 			}
-			editorView := renderEditorView(&m.editor, m.currentLang, t, editorW-2, mainH-2, m.cursorVisible)
+			tabBar := renderTabBar(&m, editorW-2, t)
+			editorView := renderEditorView(&m.editors[m.activeTab], m.currentLang, t, editorW-2, mainH-3, m.cursorVisible)
+			editorContent := tabBar + "\n" + editorView
 			if m.searchOpen {
 				matchInfo := ""
 				if len(m.searchMatches) > 0 {
@@ -2838,9 +2962,9 @@ func (m model) View() string {
 					Background(lipgloss.Color(t.Surface)).
 					Width(editorW - 2).
 					Render(fmt.Sprintf(" Search: %s%s    [Enter] next  [Esc] close", m.searchQuery, matchInfo))
-				editorView = searchBar + "\n" + editorView
+				editorContent = searchBar + "\n" + editorContent
 			}
-			panels = append(panels, renderPanel("Editor", editorW, mainH, m.active == "editor", t, editorView))
+			panels = append(panels, renderPanel("Editor", editorW, mainH, m.active == "editor", t, editorContent))
 		}
 
 		if m.terminalVisible {
@@ -2859,8 +2983,9 @@ func (m model) View() string {
 		editorW := (m.width * 60) / 100
 		aiTermW := m.width - editorW - gap
 
-		
-		editorView := renderEditorView(&m.editor, m.currentLang, t, editorW-2, mainH-2, m.cursorVisible)
+		tabBar := renderTabBar(&m, editorW-2, t)
+		editorView := renderEditorView(&m.editors[m.activeTab], m.currentLang, t, editorW-2, mainH-3, m.cursorVisible)
+		editorContent := tabBar + "\n" + editorView
 		if m.searchOpen {
 			matchInfo := ""
 			if len(m.searchMatches) > 0 {
@@ -2871,9 +2996,9 @@ func (m model) View() string {
 				Background(lipgloss.Color(t.Surface)).
 				Width(editorW - 2).
 				Render(fmt.Sprintf(" Search: %s%s    [Enter] next  [Esc] close", m.searchQuery, matchInfo))
-			editorView = searchBar + "\n" + editorView
+				editorContent = searchBar + "\n" + editorContent
 		}
-		editorPanel := renderPanel(m.editor.editorTitle(), editorW, mainH, m.active == "editor", t, editorView)
+		editorPanel := renderPanel(m.editors[m.activeTab].editorTitle(), editorW, mainH, m.active == "editor", t, editorContent)
 		divStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Width(gap).Render("│")
 		aiTermPanel := renderAITerminal(aiTermW, mainH, m.active == "terminal", t, m.aiTerminalBuf.String(), m.aiTerminalInput, m.cursorVisible, m.aiAgentName)
 		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, editorPanel, divStyle, aiTermPanel)
@@ -2882,7 +3007,9 @@ func (m model) View() string {
 		m.fileTreeVisible = false
 		m.editorVisible = true
 		m.terminalVisible = false
-		editorView := renderEditorView(&m.editor, m.currentLang, t, m.width-2, mainH-2, m.cursorVisible)
+		tabBar := renderTabBar(&m, m.width-2, t)
+		editorView := renderEditorView(&m.editors[m.activeTab], m.currentLang, t, m.width-2, mainH-3, m.cursorVisible)
+		editorContent := tabBar + "\n" + editorView
 		if m.searchOpen {
 			matchInfo := ""
 			if len(m.searchMatches) > 0 {
@@ -2893,9 +3020,9 @@ func (m model) View() string {
 				Background(lipgloss.Color(t.Surface)).
 				Width(m.width - 2).
 				Render(fmt.Sprintf(" Search: %s%s    [Enter] next  [Esc] close", m.searchQuery, matchInfo))
-			editorView = searchBar + "\n" + editorView
+				editorContent = searchBar + "\n" + editorContent
 		}
-		mainArea = renderPanel(m.editor.editorTitle(), m.width, mainH, true, t, editorView)
+		mainArea = renderPanel(m.editors[m.activeTab].editorTitle(), m.width, mainH, true, t, editorContent)
 
 	case 3: // Terminal Focus: Editor (40%) | AI Terminal (60%)
 		m.fileTreeVisible = false
@@ -2904,8 +3031,9 @@ func (m model) View() string {
 		editorW := (m.width * 40) / 100
 		aiTermW := m.width - editorW - gap
 
-		
-		editorView := renderEditorView(&m.editor, m.currentLang, t, editorW-2, mainH-2, m.cursorVisible)
+		tabBar := renderTabBar(&m, editorW-2, t)
+		editorView := renderEditorView(&m.editors[m.activeTab], m.currentLang, t, editorW-2, mainH-3, m.cursorVisible)
+		editorContent := tabBar + "\n" + editorView
 		if m.searchOpen {
 			matchInfo := ""
 			if len(m.searchMatches) > 0 {
@@ -2916,9 +3044,9 @@ func (m model) View() string {
 				Background(lipgloss.Color(t.Surface)).
 				Width(editorW - 2).
 				Render(fmt.Sprintf(" Search: %s%s    [Enter] next  [Esc] close", m.searchQuery, matchInfo))
-			editorView = searchBar + "\n" + editorView
+				editorContent = searchBar + "\n" + editorContent
 		}
-		editorPanel := renderPanel(m.editor.editorTitle(), editorW, mainH, m.active == "editor", t, editorView)
+		editorPanel := renderPanel(m.editors[m.activeTab].editorTitle(), editorW, mainH, m.active == "editor", t, editorContent)
 		divStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Width(gap).Render("│")
 		aiTermPanel := renderAITerminal(aiTermW, mainH, m.active == "terminal", t, m.aiTerminalBuf.String(), m.aiTerminalInput, m.cursorVisible, m.aiAgentName)
 		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, editorPanel, divStyle, aiTermPanel)
@@ -2941,7 +3069,7 @@ func (m model) View() string {
 	fileInfo := ""
 	if m.currentPath != "" {
 		fname := filepath.Base(m.currentPath)
-		if m.editor.modified {
+		if m.editors[m.activeTab].modified {
 			fname += " •"
 			fileInfo = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Warning)).Background(lipgloss.Color(t.Background)).Render(" " + fname + " ")
 		} else {
@@ -2965,7 +3093,7 @@ func (m model) View() string {
 	// Cursor position
 	cursorInfo := ""
 	if m.active == "editor" && m.currentPath != "" {
-		cursorInfo = lipgloss.NewStyle().Foreground(lipgloss.Color(t.TextMuted)).Background(lipgloss.Color(t.Background)).Render(fmt.Sprintf(" Ln %d, Col %d ", m.editor.cursorRow+1, m.editor.cursorCol+1))
+		cursorInfo = lipgloss.NewStyle().Foreground(lipgloss.Color(t.TextMuted)).Background(lipgloss.Color(t.Background)).Render(fmt.Sprintf(" Ln %d, Col %d ", m.editors[m.activeTab].cursorRow+1, m.editors[m.activeTab].cursorCol+1))
 	}
 
 	// Active AI agent indicator
@@ -3413,84 +3541,84 @@ func (m *model) handleEditorKey(key string) {
 	switch key {
 	// --- Text input ---
 	case "enter":
-		m.editor.insertNewline()
+		m.editors[m.activeTab].insertNewline()
 	case "tab":
-		m.editor.insertTab()
+		m.editors[m.activeTab].insertTab()
 	case "backspace":
-		m.editor.backspace()
+		m.editors[m.activeTab].backspace()
 	case "delete":
-		m.editor.deleteChar()
+		m.editors[m.activeTab].deleteChar()
 
 	// --- Cursor movement ---
 	case "left":
-		m.editor.moveLeft()
+		m.editors[m.activeTab].moveLeft()
 	case "right":
-		m.editor.moveRight()
+		m.editors[m.activeTab].moveRight()
 	case "up":
-		m.editor.moveUp()
+		m.editors[m.activeTab].moveUp()
 	case "down":
-		m.editor.moveDown()
+		m.editors[m.activeTab].moveDown()
 	case "home":
-		m.editor.moveHome()
+		m.editors[m.activeTab].moveHome()
 	case "end":
-		m.editor.moveEnd()
+		m.editors[m.activeTab].moveEnd()
 	case "ctrl+left":
-		m.editor.moveWordLeft()
+		m.editors[m.activeTab].moveWordLeft()
 	case "ctrl+right":
-		m.editor.moveWordRight()
+		m.editors[m.activeTab].moveWordRight()
 	case "ctrl+home":
-		m.editor.moveToFirstLine()
+		m.editors[m.activeTab].moveToFirstLine()
 	case "ctrl+end":
-		m.editor.moveToLastLine()
+		m.editors[m.activeTab].moveToLastLine()
 
 	// --- Selection ---
 	case "shift+left":
-		m.editor.selectLeft()
+		m.editors[m.activeTab].selectLeft()
 	case "shift+right":
-		m.editor.selectRight()
+		m.editors[m.activeTab].selectRight()
 	case "shift+up":
-		m.editor.selectUp()
+		m.editors[m.activeTab].selectUp()
 	case "shift+down":
-		m.editor.selectDown()
+		m.editors[m.activeTab].selectDown()
 	case "shift+home":
-		m.editor.selectHome()
+		m.editors[m.activeTab].selectHome()
 	case "shift+end":
-		m.editor.selectEnd()
+		m.editors[m.activeTab].selectEnd()
 	case "ctrl+a":
-		m.editor.selectAll()
+		m.editors[m.activeTab].selectAll()
 
 	// --- Clipboard ---
 	case "ctrl+c":
-		text := m.editor.copySelection()
+		text := m.editors[m.activeTab].copySelection()
 		if text != "" {
 			clipboard.WriteAll(text)
 		}
 	case "ctrl+x":
-		text := m.editor.cutSelection()
+		text := m.editors[m.activeTab].cutSelection()
 		if text != "" {
 			clipboard.WriteAll(text)
 		}
 	case "ctrl+v":
 		text, err := clipboard.ReadAll()
 		if err == nil && text != "" {
-			m.editor.clipText = text
-			m.editor.pasteClipboard()
+			m.editors[m.activeTab].clipText = text
+			m.editors[m.activeTab].pasteClipboard()
 		}
 
 	// --- Undo/Redo ---
 	case "ctrl+z":
-		m.editor.undo()
+		m.editors[m.activeTab].undo()
 	case "ctrl+y":
-		m.editor.redo()
+		m.editors[m.activeTab].redo()
 
 	// --- Escape: clear selection ---
 	case "esc":
-		m.editor.clearSelection()
+		m.editors[m.activeTab].clearSelection()
 
 	// --- Printable characters ---
 	default:
 		if len(key) == 1 {
-			m.editor.insertAtCursor(key)
+			m.editors[m.activeTab].insertAtCursor(key)
 		}
 	}
 }
